@@ -729,8 +729,7 @@
 
     var selectedModel = [_modelPopUpButton titleOfSelectedItem];
 
-    // Erhöhter Timeout auf Client-Seite (z. B. 300 Sekunden / 5 Minuten), passend zum Backend-Timeout
-    var request = [CPURLRequest requestWithURL:"/DBB/extract_phenopacket"
+    var request = [CPURLRequest requestWithURL:"/DBB/extract_fhir_inex_criteria"
                                    cachePolicy:CPURLRequestUseProtocolCachePolicy
                                timeoutInterval:300.0];
 
@@ -755,7 +754,13 @@
             try {
                 var parsedData = JSON.parse(data);
                 console.log("DEBUG [Backend Response] raw phenopacket: ", parsedData);
-                [self importPhenopacketToEditor:parsedData];
+                
+                // Route directly to the visual importer if the response is already a FHIR Group
+                if (parsedData && parsedData.resourceType === "Group") {
+                    [self importFHIRGroup:parsedData];
+                } else {
+                    [self importPhenopacketToEditor:parsedData];
+                }
             } catch (e) {
                 alert("Error parsing server-side extraction response: " + e.message);
             }
@@ -1008,11 +1013,7 @@
     {
         _isImportingJSON = YES;
 
-        // --- FIX: Initialisierung des Caches für den Delegate ---
-        _importedTextFieldsByRow = [CPMutableDictionary dictionary];
-
-        // 1. Safe clear: loop in reverse order with includeSubrows:NO 
-        // to cleanly bypass the recursive index-deletion bug in the framework
+        // 1. Safe clear: dismantle rows in reverse order with includeSubrows:NO
         var count = [_ruleEditor numberOfRows];
         if (count > 0)
         {
@@ -1023,27 +1024,74 @@
             }
         }
 
+        // Reset the text-field cache dictionary
+        _importedTextFieldsByRow = [CPMutableDictionary dictionary];
+
         var rootRows = [_ruleEditor _rootRowsArray];
-        // rootRows is now safely empty.
+        // rootRows is now empty.
 
-        var characteristics = rootGroup.characteristic || [];
-        var neededCount = characteristics.length;
+        // 2. Build the recursive tree structure in memory
+        var indexWrapper = { value: 0 };
+        var rootRow = [self _buildRowObjectFromFHIRGroup:rootGroup targetTextFieldIndex:indexWrapper];
 
-        // Create the pre-built child row objects in memory
-        var subrowsArray = [CPMutableArray array];
-
-        for (var i = 0; i < neededCount; i++)
+        if (rootRow)
         {
-            var item = characteristics[i];
-            var rawText = @"";
+            [rootRows addObject:rootRow];
+        }
 
-            var valCodeableConcept = item.valueCodeableConcept;
+        [self performSelector:@selector(_enableImporting) withObject:nil afterDelay:0];
+    }
+    catch (e)
+    {
+        console.error("[FHIR Error] Exception in structural reconstruction: ", e);
+        _isImportingJSON = NO;
+    }
+}
+
+- (id)_buildRowObjectFromFHIRGroup:(id)group targetTextFieldIndex:(id)indexWrapper
+{
+    if (!group) return nil;
+
+    var combinationMethod = group.combinationMethod || "all-of";
+    var predicateType = (combinationMethod === "any-of") ? CPOrPredicateType : CPAndPredicateType;
+    var dispAllAny = (predicateType === CPOrPredicateType) ? @"Any" : @"All";
+
+    // Instantiate and configure the compound group row object
+    var rootRow = [[_CPRuleEditorRowObject alloc] init];
+    [rootRow setRowType:CPRuleEditorRowTypeCompound];
+    [rootRow setCriteria:[CPArray arrayWithObjects:predicateType, @"_logical_text_", nil]];
+    [rootRow setDisplayValues:[CPArray arrayWithObjects:dispAllAny, @"of the following are true", nil]];
+
+    // Increment indexWrapper for this Compound row
+    indexWrapper.value = indexWrapper.value + 1;
+
+    var subrowsArray = [CPMutableArray array];
+    var characteristics = group.characteristic || [];
+
+    for (var i = 0; i < characteristics.length; i++)
+    {
+        var charItem = characteristics[i];
+
+        // Case A: Recurse into subgroup
+        if (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod)
+        {
+            var subgroupRow = [self _buildRowObjectFromFHIRGroup:charItem targetTextFieldIndex:indexWrapper];
+            if (subgroupRow)
+            {
+                [subrowsArray addObject:subgroupRow];
+            }
+        }
+        // Case B: Create simple symptom characteristic
+        else
+        {
+            var rawText = @"";
+            var valCodeableConcept = charItem.valueCodeableConcept;
             if (valCodeableConcept && valCodeableConcept.coding && valCodeableConcept.coding.length > 0)
             {
                 rawText = valCodeableConcept.coding[0].display || @"";
             }
 
-            var presence = item.exclude ? @"exclusion" : @"inclusion";
+            var presence = charItem.exclude ? @"exclusion" : @"inclusion";
             var dispInclusionExclusion = (presence === @"exclusion") ? @"Must NOT be present (Exclusion)" : @"Must be present (Inclusion)";
 
             var inputField = [[CPTextField alloc] initWithFrame:CGRectMake(0, 0, 160, 24)];
@@ -1060,14 +1108,13 @@
                                                          name:CPControlTextDidChangeNotification
                                                        object:inputField];
 
-            // --- FIX: Textfeld im Dictionary für den Delegate registrieren ---
-            // Zeile 0 ist die "All/Any"-Gruppe, daher i + 1 für die Kriterien-Zeilen
-            [_importedTextFieldsByRow setObject:inputField forKey:[CPNumber numberWithInt:i + 1]];
+            // Map the input field to its target row index sequentially
+            var targetRowIndex = indexWrapper.value;
+            [_importedTextFieldsByRow setObject:inputField forKey:[CPNumber numberWithInt:targetRowIndex]];
+            
+            // Increment indexWrapper for this Simple row
+            indexWrapper.value = indexWrapper.value + 1;
 
-            // Diagnostic logging
-            console.log("DEBUG [FHIR Editor] Row " + (i + 1) + ": '" + rawText + "' | raw item.exclude=" + item.exclude + " | mapped presence=" + presence);
-
-            // Construct state-complete child row objects
             var childRow = [[_CPRuleEditorRowObject alloc] init];
             [childRow setRowType:CPRuleEditorRowTypeSimple];
             [childRow setCriteria:[CPArray arrayWithObjects:@"phenotype", presence, @"_value_field_", nil]];
@@ -1076,28 +1123,10 @@
 
             [subrowsArray addObject:childRow];
         }
-
-        // Configure the root compound row
-        var combinationMethod = rootGroup.combinationMethod || "all-of";
-        var rootPredicateType = (combinationMethod === "any-of") ? CPOrPredicateType : CPAndPredicateType;
-        var dispAllAny = (rootPredicateType === CPOrPredicateType) ? @"Any" : @"All";
-
-        var rootRow = [[_CPRuleEditorRowObject alloc] init];
-        [rootRow setRowType:CPRuleEditorRowTypeCompound];
-        [rootRow setCriteria:[CPArray arrayWithObjects:rootPredicateType, @"_logical_text_", nil]];
-        [rootRow setDisplayValues:[CPArray arrayWithObjects:dispAllAny, @"of the following are true", nil]];
-        [rootRow setSubrows:subrowsArray];
-
-        // Inserting the populated hierarchy into the empty root rows array triggers a clean, single visual rebuild
-        [rootRows addObject:rootRow];
-
-        [self performSelector:@selector(_enableImporting) withObject:nil afterDelay:0];
     }
-    catch (e)
-    {
-        console.error("[FHIR Error] Exception in structural reconstruction: ", e);
-        _isImportingJSON = NO;
-    }
+
+    [rootRow setSubrows:subrowsArray];
+    return rootRow;
 }
 
 - (void)_enableImporting

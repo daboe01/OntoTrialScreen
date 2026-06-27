@@ -1,6 +1,6 @@
 #!/usr/bin/env perl
 
-# HPO Backend - Upgraded with Native Tool Use, JSON Schema Constraints, Chunking & Dynamic LLM Routing
+# HPO Backend - Upgraded with Native Tool Use, Hierarchical JSON Schema, Chunking & Dynamic LLM Routing
 use Mojolicious::Lite;
 use Mojolicious::Plugin::Database;
 use SQL::Abstract;
@@ -9,7 +9,7 @@ use Data::Dumper;
 use Mojo::UserAgent;
 use Apache::Session::File;
 use Encode;
-use Mojo::JSON qw(decode_json encode_json);
+use Mojo::JSON qw(decode_json encode_json from_json to_json);
 use DBIx::Connector;
 use POSIX qw(strftime);
 
@@ -68,68 +68,57 @@ $ua->max_connections(0);
 # =========================================================
 # EXTRACTION SCHEMAS (JSON Schema strict constraints)
 # =========================================================
-my $phenotypic_features_schema = {
+my $hierarchical_group_schema = {
     type => 'object',
     properties => {
-        phenotypicFeatures => {
+        combinationMethod => { type => 'string', enum => ['all-of', 'any-of'] },
+        characteristics => {
             type => 'array',
             items => {
                 type => 'object',
                 properties => {
-                    type => {
+                    symptom => {
                         type => 'object',
                         properties => {
-                            label => { type => 'string' }
+                            label => { type => 'string', description => 'Standard clinical name of the symptom or phenotypic feature' },
+                            exclude => { type => 'boolean', description => 'true if listed under Exclusion Criteria (Must NOT be present), false if listed under Inclusion Criteria (Must be present).' }
                         },
-                        required => ['label'],
+                        required => ['label', 'exclude'],
                         additionalProperties => \0
                     },
-                    # Add this new property to enable the LLM to classify inclusion vs exclusion
-                    exclude => {
-                        type => 'boolean',
-                        description => 'Set to true if this clinical symptom is listed under Exclusion Criteria (must NOT be present), set to false if it is listed under Inclusion Criteria (must be present).'
-                    },
-                    severity => {
+                    subgroup => {
                         type => 'object',
                         properties => {
-                            label => { type => 'string' }
-                        },
-                        required => ['label'],
-                        additionalProperties => \0
-                    },
-                    onset => {
-                        type => 'object',
-                        properties => {
-                            ontologyClass => {
-                                type => 'object',
-                                properties => {
-                                    label => { type => 'string' }
-                                },
-                                required => ['label'],
-                                additionalProperties => \0
+                            combinationMethod => { type => 'string', enum => ['all-of', 'any-of'] },
+                            characteristics => {
+                                type => 'array',
+                                items => {
+                                    type => 'object',
+                                    properties => {
+                                        symptom => {
+                                            type => 'object',
+                                            properties => {
+                                                label => { type => 'string' },
+                                                exclude => { type => 'boolean' }
+                                            },
+                                            required => ['label', 'exclude'],
+                                            additionalProperties => \0
+                                        }
+                                    },
+                                    required => ['symptom'],
+                                    additionalProperties => \0
+                                }
                             }
                         },
-                        required => ['ontologyClass'],
+                        required => ['combinationMethod', 'characteristics'],
                         additionalProperties => \0
-                    },
-                    modifiers => {
-                        type => 'array',
-                        items => {
-                            type => 'object',
-                            properties => {
-                                label => { type => 'string' }
-                            },
-                            required => ['label'],
-                            additionalProperties => \0
-                        }
                     }
                 },
-                required => ['type'],
                 additionalProperties => \0
             }
         }
     },
-    required => ['phenotypicFeatures'],
+    required => ['combinationMethod', 'characteristics'],
     additionalProperties => \0
 };
 
@@ -158,23 +147,31 @@ my $icd10_schema = {
 # =========================================================
 
 # Robust JSON extraction block parser to recover nested structures from narrative chat responses
+# Robust JSON extraction block parser to recover nested structures from narrative chat responses
 sub clean_and_parse_json {
     my ($raw_content) = @_;
     return unless defined $raw_content;
 
-    # 1. Straightforward deserialization check
-    my $data = eval { decode_json($raw_content) };
+    # Pre-process: Double-escape raw backslashes that are not valid JSON escape sequences (e.g., LaTeX \le, \ge, \pm)
+    $raw_content =~ s/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/\\\\/g;
+
+    # 1. Straightforward deserialization check (handles decoded characters first, then falls back to raw bytes)
+    my $data = eval { from_json($raw_content) } // eval { decode_json($raw_content) };
     return $data if $data;
 
     # 2. Extract from standard Markdown blocks
     if ($raw_content =~ /^\s*```(?:json)?\s*(.*?)\s*```/is) {
-        $data = eval { decode_json($1) };
+        my $inner = $1;
+        $inner =~ s/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/\\\\/g;
+        $data = eval { from_json($inner) } // eval { decode_json($inner) };
         return $data if $data;
     }
 
-    # 3. Aggressive extraction searching for first '{' and last '}'
-    if ($raw_content =~ /(\{.*\})/gs) {
-        $data = eval { decode_json($1) };
+    # 3. Aggressive extraction searching for first '{' and last '}' (with multi-line safety)
+    if ($raw_content =~ /(\{.*\})/s) {
+        my $inner = $1;
+        $inner =~ s/\\(?!["\\\/bfnrt]|u[0-9a-fA-F]{4})/\\\\/g;
+        $data = eval { from_json($inner) } // eval { decode_json($inner) };
         return $data if $data;
     }
 
@@ -220,6 +217,79 @@ sub merge_extracted_structures {
     }
 }
 
+# Normalizes alternative JSON designs generated by unstructured local LLMs to the expected hierarchical schema
+sub normalize_to_hierarchical_schema {
+    my ($raw) = @_;
+    return unless ref $raw eq 'HASH';
+
+    # If already aligned with the target schema, return as is
+    if (exists $raw->{characteristics} && ref $raw->{characteristics} eq 'ARRAY') {
+        return $raw;
+    }
+
+    my $normalized = {
+        combinationMethod => $raw->{combinationMethod} // 'all-of',
+        characteristics => []
+    };
+
+    # Match common local model variations (e.g., Gemma's phenotypic_features)
+    if (exists $raw->{phenotypic_features} && ref $raw->{phenotypic_features} eq 'ARRAY') {
+        foreach my $group_item (@{$raw->{phenotypic_features}}) {
+            my $group_exclude = ($group_item->{exclude} || ($group_item->{name} && $group_item->{name} =~ /exclusion/i)) ? 1 : 0;
+            my $group_logic = $group_item->{logic} // $group_item->{combinationMethod} // 'all-of';
+            $group_logic = ($group_logic =~ /any/i) ? 'any-of' : 'all-of';
+
+            my $subgroup = {
+                combinationMethod => $group_logic,
+                characteristics => []
+            };
+
+            # Handle nested subgroups
+            if (exists $group_item->{subgroups} && ref $group_item->{subgroups} eq 'ARRAY') {
+                foreach my $sub (@{$group_item->{subgroups}}) {
+                    my $sub_logic = $sub->{logic} // $sub->{combinationMethod} // 'all-of';
+                    $sub_logic = ($sub_logic =~ /any/i) ? 'any-of' : 'all-of';
+
+                    my $nested_sub = {
+                        combinationMethod => $sub_logic,
+                        characteristics => []
+                    };
+
+                    if (exists $sub->{features} && ref $sub->{features} eq 'ARRAY') {
+                        foreach my $feat (@{$sub->{features}}) {
+                            push @{$nested_sub->{characteristics}}, {
+                                symptom => {
+                                    label => $feat,
+                                    exclude => $group_exclude ? \1 : \0
+                                }
+                            };
+                        }
+                    }
+                    push @{$subgroup->{characteristics}}, { subgroup => $nested_sub } if @{$nested_sub->{characteristics}};
+                }
+            }
+
+            # Handle flat features inside the parent group item
+            if (exists $group_item->{features} && ref $group_item->{features} eq 'ARRAY') {
+                foreach my $feat (@{$group_item->{features}}) {
+                    push @{$subgroup->{characteristics}}, {
+                        symptom => {
+                            label => $feat,
+                            exclude => $group_exclude ? \1 : \0
+                        }
+                    };
+                }
+            }
+
+            if (@{$subgroup->{characteristics}}) {
+                push @{$normalized->{characteristics}}, { subgroup => $subgroup };
+            }
+        }
+    }
+
+    return $normalized;
+}
+
 helper format_hpo_id => sub {
     my ($self, $raw_id) = @_;
     $raw_id =~ s/\D//g;
@@ -255,10 +325,66 @@ helper map_to_hpo_async => sub {
 };
 
 # =========================================================
-# CHUNK-WISE STRUCTURED LLM EXTRACTION UTILITY (RECOVERY IMPLEMENTED)
+# RECURSIVE ASYNCHRONOUS HPO MAPPER HELPER
 # =========================================================
+helper map_hierarchical_group_async => sub {
+    my ($self, $group) = @_;
+    return Mojo::Promise->resolve(undef) unless ref $group eq 'HASH';
+
+    my $combination_method = $group->{combinationMethod} // 'all-of';
+    my $characteristics    = $group->{characteristics}    // [];
+
+    my @promises;
+    my $mapped_characteristics = [];
+
+    foreach my $char (@$characteristics) {
+        if (my $sym = $char->{symptom}) {
+            my $label   = $sym->{label};
+            my $exclude = $sym->{exclude} ? 1 : 0;
+
+            my $p = $self->map_to_hpo_async($label, 0)->then(sub {
+                my $mapped_hpo = shift;
+                push @$mapped_characteristics, {
+                    exclude => $exclude ? \1 : \0,
+                    valueCodeableConcept => {
+                        coding => [{
+                            system  => "http://human-phenotype-ontology.org",
+                            code    => $mapped_hpo->{id},
+                            display => $mapped_hpo->{label} // $label
+                        }]
+                    }
+                };
+            });
+            push @promises, $p;
+        }
+        elsif (my $sub = $char->{subgroup}) {
+            my $p = $self->map_hierarchical_group_async($sub)->then(sub {
+                my $mapped_subgroup = shift;
+                push @$mapped_characteristics, $mapped_subgroup if $mapped_subgroup;
+            });
+            push @promises, $p;
+        }
+    }
+
+    if (@promises) {
+        return Mojo::Promise->all(@promises)->then(sub {
+            return {
+                resourceType      => "Group",
+                combinationMethod => $combination_method,
+                characteristic    => $mapped_characteristics
+            };
+        });
+    } else {
+        return Mojo::Promise->resolve({
+            resourceType      => "Group",
+            combinationMethod => $combination_method,
+            characteristic    => $mapped_characteristics
+        });
+    }
+};
+
 # =========================================================
-# CHUNK-WISE STRUCTURED LLM EXTRACTION UTILITY (RECOVERY IMPLEMENTED)
+# CHUNK-WISE STRUCTURED LLM EXTRACTION UTILITY
 # =========================================================
 helper extract_structured_data_async => sub {
     my ($self, $text, $schema, $system_instruction, $user_prompt, $client_model) = @_;
@@ -278,6 +404,13 @@ helper extract_structured_data_async => sub {
         $is_local_provider = 1;
     }
 
+    # Guide local models by appending the JSON schema design to the system instruction
+    my $effective_sys_instruction = $system_instruction;
+    if ($is_local_provider) {
+        my $schema_json = encode_json($schema);
+        $effective_sys_instruction .= "\n\nCRITICAL: You must format your JSON output to conform exactly to this schema:\n$schema_json\nDo not use custom keys outside of this specification.";
+    }
+
     my $process_chunk;
     $process_chunk = sub {
         my $chunk_idx = shift;
@@ -292,15 +425,13 @@ helper extract_structured_data_async => sub {
         my $api_payload = {
             model       => $active_model,
             messages    => [
-            { role => 'system', content => $system_instruction },
+            { role => 'system', content => $effective_sys_instruction },
             { role => 'user',   content => "CHUNK INPUT TEXT:\n---\n$chunk_text\n---\nPrompt: $user_prompt" }
             ],
             temperature => 0.0,
         };
 
-        # Adjust the payload format dynamically based on the model provider
         if ($is_local_provider) {
-            # Local Ollama works much more reliably with general JSON mode than complex json_schema payloads
             $self->app->log->debug("[Backend] Local model provider detected. Using standardized JSON Mode.");
             $api_payload->{response_format} = { type => 'json' };
         } else {
@@ -321,14 +452,18 @@ helper extract_structured_data_async => sub {
             if ($tx_call->result && $tx_call->result->is_success) {
                 my $content = $tx_call->result->json('/choices/0/message/content') // $tx_call->result->body // '';
 
-                # Detailed diagnostic logging of the raw LLM response
                 $self->app->log->debug("[Backend] Raw response from LLM (first 500 characters):\n" . substr($content, 0, 500) . "...");
 
-                # Robust JSON Recovery
                 my $parsed = clean_and_parse_json($content);
 
                 if ($parsed) {
                     $self->app->log->debug("[Backend] Successfully parsed target structured JSON for chunk $chunk_idx.");
+
+                    # Normalize deviations if local provider was used
+                    if ($is_local_provider) {
+                        $parsed = normalize_to_hierarchical_schema($parsed);
+                    }
+
                     merge_extracted_structures($merged_extracted, $parsed, $schema);
                 } else {
                     $self->app->log->error("[Backend] JSON Parser failed to extract a clean structure. Raw string content:\n$content");
@@ -353,9 +488,8 @@ helper extract_structured_data_async => sub {
 # EXTRACTION ENDPOINTS
 # =========================================================
 
-post '/DBB/extract_phenopacket' => sub {
+post '/DBB/extract_fhir_inex_criteria' => sub {
     my $c = shift;
-
     $c->inactivity_timeout(300);
 
     my $payload = $c->req->json;
@@ -368,119 +502,27 @@ post '/DBB/extract_phenopacket' => sub {
 
     $c->render_later;
 
-    # Explicit JSON structure prompt enforcement for models operating under general JSON mode fallbacks
     my $sys_instruction = "You are an expert medical entity extraction assistant. "
-    . "Your job is to extract patient phenotype abnormalities, severities, onsets, and individual phenotypic modifiers strictly conforming to the requested schema. "
-    . "You must output raw JSON ONLY matching the following schema keys: { phenotypicFeatures: [ { type: { label: '...' } } ] }. "
+    . "Your job is to analyze the patient clinical synopsis and extract patient phenotypic features into a logical nested group structure. "
+    . "Group the clinical symptoms into logical blocks using 'all-of' (AND) and 'any-of' (OR) relationships. "
+    . "Set the 'exclude' flag to true for symptoms listed under Exclusion Criteria (must NOT be present), and to false for symptoms listed under Inclusion Criteria. "
+    . "You must output raw JSON ONLY conforming strictly to the requested schema. "
     . "Do not write any introductory text, explanation, or markdown backticks outside of the raw JSON payload.";
 
-    my $user_prompt     = "Analyze the patient clinical description and extract the exact phenotypic structures.";
+    my $user_prompt = "Analyze the study protocol text, identify the inclusion/exclusion requirements, group them logically into subgroups, and extract nested criteria accordingly.";
 
-    $c->extract_structured_data_async($text_content, $phenotypic_features_schema, $sys_instruction, $user_prompt, $selected_model)->then(sub {
+    $c->extract_structured_data_async($text_content, $hierarchical_group_schema, $sys_instruction, $user_prompt, $selected_model)->then(sub {
         my $extracted_data = shift;
-        my $raw_features = $extracted_data->{phenotypicFeatures} // [];
 
-        my @feature_promises;
-
-        foreach my $raw_feat (@$raw_features) {
-            next unless $raw_feat->{type} && $raw_feat->{type}{label};
-
-            my $feat_promise = $c->map_to_hpo_async($raw_feat->{type}{label}, 0)->then(sub {
-                my $mapped_type = shift;
-
-                my $mapped_feature = {
-                    type    => $mapped_type,
-                    exclude => $raw_feat->{exclude} ? \1 : \0
-                };
-
-                my @sub_promises;
-
-                if (my $sev_label = $raw_feat->{severity}{label}) {
-                    push @sub_promises, $c->map_to_hpo_async($sev_label, 1)->then(sub {
-                        $mapped_feature->{severity} = shift;
-                    });
-                }
-
-                if (my $ons_label = $raw_feat->{onset}{ontologyClass}{label}) {
-                    push @sub_promises, $c->map_to_hpo_async($ons_label, 1)->then(sub {
-                        $mapped_feature->{onset} = { ontologyClass => shift };
-                    });
-                }
-
-                if (my $mods = $raw_feat->{modifiers}) {
-                    $mapped_feature->{modifiers} = [];
-                    foreach my $mod (@$mods) {
-                        if (my $mod_label = $mod->{label}) {
-                            push @sub_promises, $c->map_to_hpo_async($mod_label, 1)->then(sub {
-                                push @{$mapped_feature->{modifiers}}, shift;
-                            });
-                        }
-                    }
-                }
-
-                @sub_promises = grep { defined $_ } @sub_promises;
-
-                if (@sub_promises) {
-                    return Mojo::Promise->all(@sub_promises)->then(sub {
-                        return $mapped_feature;
-                    });
-                } else {
-                    return Mojo::Promise->resolve($mapped_feature);
-                }
-            });
-
-            push @feature_promises, $feat_promise;
-        }
-
-        @feature_promises = grep { defined $_ } @feature_promises;
-
-        if (!@feature_promises) {
-            $c->app->log->warn("[Backend] Extraction complete, but zero valid phenotypic characteristics were structured.");
-            return unless $c->tx && !$c->tx->is_finished;
-            return $c->render(json => {
-                error => "No phenotypic features identified during pipeline execution.",
-                details => "The model response did not contain the expected structure or terms. Please check server log for output diagnostics."
-            }, status => 400);
-        }
-
-        return Mojo::Promise->all(@feature_promises)->then(sub {
-            my @final_features = map { $_->[0] } @_;
-            my $timestamp = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime);
-
-            my $phenopacket = {
-                id => "phenopacket-" . time(),
-                subject => {
-                    id => "anonymous-patient",
-                    taxonomy => {
-                        id => "NCBITaxon:9606",
-                        label => "homo sapiens"
-                    }
-                },
-                phenotypicFeatures => \@final_features,
-                metaData => {
-                    created => $timestamp,
-                    createdBy => "OntoMan",
-                    phenopacketSchemaVersion => "2.0.0",
-                    resources => [
-                    {
-                        id => "hp",
-                        name => "human phenotype ontology",
-                        url => "http://purl.obolibrary.org/obo/hp.owl",
-                        version => "2023-10-09",
-                        namespacePrefix => "HP",
-                        iriPrefix => "http://purl.obolibrary.org/obo/HP_"
-                    }
-                    ]
-                }
-            };
-
+        return $c->map_hierarchical_group_async($extracted_data)->then(sub {
+            my $mapped_group = shift;
             if ($c->tx && !$c->tx->is_finished) {
-                $c->render(json => $phenopacket);
+                $c->render(json => $mapped_group);
             }
         });
     })->catch(sub {
         my $err = shift;
-        $c->app->log->error("Error during Phenopacket Generation: $err");
+        $c->app->log->error("Error during FHIR Group Generation: $err");
         if ($c->tx && !$c->tx->is_finished) {
             $c->render(json => { error => "Pipeline failure", details => "$err" }, status => 500);
         }
