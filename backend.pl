@@ -599,7 +599,7 @@ post '/DBB/extract_fhir_inex_criteria' => sub {
             },
             {
                 subgroup => {
-                    combinationMethod => "any-of",
+                    combinationMethod => "all-of",
                     characteristics => [
                     {
                         symptom => {

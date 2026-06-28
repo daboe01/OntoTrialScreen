@@ -1295,6 +1295,31 @@
     return node;
 }
 
+- (BOOL)_groupContainsExclusions:(id)group
+{
+    if (!group)
+        return NO;
+
+    var characteristics = group.characteristic || [];
+    for (var i = 0; i < characteristics.length; i++)
+    {
+        var charItem = characteristics[i];
+        
+        // Check if the individual characteristic is an exclusion
+        if (charItem.exclude === true)
+            return YES;
+
+        // Recursively check nested subgroups
+        var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
+        if (isSubgroup)
+        {
+            if ([self _groupContainsExclusions:charItem])
+                return YES;
+        }
+    }
+    return NO;
+}
+
 - (id)_flattenFHIRGroup:(id)group
 {
     if (!group) return nil;
@@ -1311,7 +1336,12 @@
         {
             var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
 
-            if (flattenedSubgroup.combinationMethod === group.combinationMethod)
+            // Only flatten if combination methods match AND the subgroup contains no exclusions.
+            // This preserves the visual isolation of the exclusion block.
+            var shouldFlatten = (flattenedSubgroup.combinationMethod === group.combinationMethod) && 
+                                ![self _groupContainsExclusions:flattenedSubgroup];
+
+            if (shouldFlatten)
             {
                 var subCharacteristics = flattenedSubgroup.characteristic || [];
                 for (var j = 0; j < subCharacteristics.length; j++)
