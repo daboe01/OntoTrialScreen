@@ -1,96 +1,56 @@
-# 🧬 Human Phenotype Ontology (HPO) Browser
+# Clinical Trial Eligibility Framework & HPO Browser
 
-A full-stack, desktop-class web application for navigating, searching, and inspecting the [Human Phenotype Ontology (HPO)](https://hpo.jax.org/). 
+An integrated, full-stack environment designed for structured clinical trial eligibility definition. The platform connects a visual logical rules editor with semantic phenotype extraction powered by Large Language Models (LLMs) and the Human Phenotype Ontology (HPO).
 
-This project provides a lightning-fast native-like GUI in the browser using **Cappuccino (Objective-J)**, backed by a **PostgreSQL** database and a **Mojolicous** (Perl) backend. It efficiently parses raw `.obo` files, imports them into a relational schema, and serves them via an asynchronous, lazy-loading interface.
-
-<img width="1195" height="907" alt="Bildschirmfoto 2026-04-13 um 10 19 35" src="https://github.com/user-attachments/assets/6cfc0ae7-4b7c-4539-a062-cad49ab77c2a" />
-
-## ✨ Features
-
-* **Desktop-Class UI:** Built with Cappuccino, providing a rich, Cocoa-like split-pane interface right in your web browser.
-* **Lazy-Loading Tree View:** Navigate the massive HPO hierarchy without lag. Child nodes are fetched asynchronously only when a parent is expanded.
-* **Smart Search:** Search for specific terms and the tree will automatically resolve the path, expand the necessary branches, and scroll directly to the matched node.
-* **Comprehensive Metadata:** Instantly view detailed information for any selected term, including:
-  * Full Definitions
-  * Synonyms
-  * Cross-References (Xrefs - e.g., UMLS, SNOMED)
-  * Downstream/Child Nodes
-
-## 📦 Prerequisites
-
-Before you begin, ensure you have the following installed:
-* **PostgreSQL** (v10+)
-* **Perl** (with `Mojolicous`, `DBI`, `DBD::Pg`, and `SQL::Abstract` modules)
-
-## 🚀 Installation & Setup
-
-### 1. Database Setup
-Create a PostgreSQL database named `hpo` and run the following SQL script to set up the schema:
-
-```sql
-CREATE DATABASE hpo;
-\c hpo;
-
-CREATE TABLE terms (
-    id VARCHAR(20) PRIMARY KEY,
-    label TEXT,
-    definition TEXT,
-    comment TEXT
-);
-
-CREATE TABLE synonyms (
-    idterm VARCHAR(20) REFERENCES terms(id) ON DELETE CASCADE,
-    label TEXT
-);
-
-CREATE TABLE xrefs (
-    idterm VARCHAR(20) REFERENCES terms(id) ON DELETE CASCADE,
-    label TEXT
-);
-
-CREATE TABLE isas (
-    idchild VARCHAR(20) REFERENCES terms(id) ON DELETE CASCADE,
-    idparent VARCHAR(20) REFERENCES terms(id) ON DELETE CASCADE
-);
-```
-
-### 2. Import the OBO File
-Download the latest `hp.obo` file from the[HPO Consortium](http://www.human-phenotype-ontology.org/). Update the file path in the Perl script (`import.pl`), and run it:
-
-```bash
-# Install Perl dependencies if needed
-cpanm Mojolicious DBI DBD::Pg SQL::Abstract
-
-# Run the importer
-perl import.pl
-```
-*Note: The script automatically cleans the existing database before running a high-speed transactional import.*
-
-### 3. Backend API
-The frontend expects a backend serving JSON at the following endpoints (relative to `/DBB/`):
-* `GET /DBB/hpo/roots` - Returns the top-level HPO nodes.
-* `GET /DBB/hpo/children/:id` - Returns the immediate children of a given term.
-* `GET /DBB/hpo/search/:query` - Returns path arrays to nodes matching the search string.
-* `GET /DBB/hpo/synonyms/:id` - Returns synonyms for a given term.
-* `GET /DBB/hpo/xrefs/:id` - Returns cross-references for a given term.
-* `GET /DBB/children/idparent/:id` - Returns all downstream child node metadata.
-
-### 4. Run the Frontend
-Navigate to your Cappuccino project directory and run:
-
-```bash
-cd /path/to/your/backend
-morbo backend.pl
-```
-Open your browser and navigate to `http://localhost:3000`.
-
-## 🤝 Contributing
-Contributions, issues, and feature requests are welcome!
-
-## 📄 License
-* This project is licensed under the MIT License.
-* The Human Phenotype Ontology is created and maintained by the [Human Phenotype Ontology Consortium](https://hpo.jax.org/app/license).
+This system bridges the gap between unstructured clinical study protocol narratives and the structured, codifiable FHIR R6 `Group` resource standards.
 
 ---
-*Created with ❤️ using Objective-J and Perl.*
+
+## Architecture Overview
+
+The application is built upon a decoupled full-stack architecture:
+
+1. **Frontend (Cappuccino / Objective-J):** 
+   - Uses a Cocoa-derived MVC pattern running directly in the browser.
+   - Features a visual nesting `CPRuleEditor` to display and modify logical operators (`all-of`, `any-of`) and exclusion criteria.
+   - Includes a recursive `CPOutlineView` tree component to browse the HPO hierarchy.
+
+2. **Backend (Mojolicious / Perl):**
+   - High-throughput asynchronous REST API managing local PostgreSQL-backed HPO database lookups.
+   - Handles structured clinical extraction tasks by routing chunks of text to deep learning LLM endpoints using JSON schema constraints.
+   - Features defensive logical post-processing to ensure exclusion subgroups are structured cleanly before mapping to the UI.
+
+---
+
+## Key Features
+
+- **FHIR R6 Group Alignment:** Generates definitional and conceptual nested group representations complying with FHIR R6 standards.
+- **Hierarchical Phenotypic Extraction:** Uses system-guided LLM pipelines to parse protocol synopses into nested logical blocks.
+- **Automatic HPO Semantic Mapping:** Resolves extracted clinical descriptors to standardized HPO identifiers (e.g., `HP:0000118`) via backend mapping services.
+- **Robust Logical Validation:** Protects nested exclusion structures from losing their hierarchical boundaries when logical combination methods are changed.
+- **Dynamic HPO Tree Browser:** Asynchronously loads down-tree child classes, cross-references (xrefs), and associated standard synonyms.
+
+---
+
+## Repository Structure
+
+- `AppController.j` – The core frontend application delegate, view controllers, and rule editors written in Objective-J.
+- `backend.pl` – The Mojolicious backend microservice managing NLP pipelines, HPO search database queries, and concept mapping.
+
+---
+
+## Prerequisites & Installation
+
+### Backend Setup
+
+The backend service requires Perl 5 (version 5.20+ recommended) and a PostgreSQL database containing loaded HPO datasets.
+
+1. **Install Perl Dependencies:**
+   ```bash
+   cpanm Mojolicious
+      ```
+2. **Running the Service:**
+   You can run the Mojolicious development server directly:
+   ```bash
+   perl app.pl daemon -l http://*:3026
+   ```
