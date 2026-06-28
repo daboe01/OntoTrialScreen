@@ -147,7 +147,6 @@ my $icd10_schema = {
 # =========================================================
 
 # Robust JSON extraction block parser to recover nested structures from narrative chat responses
-# Robust JSON extraction block parser to recover nested structures from narrative chat responses
 sub clean_and_parse_json {
     my ($raw_content) = @_;
     return unless defined $raw_content;
@@ -289,6 +288,55 @@ sub normalize_to_hierarchical_schema {
     }
 
     return $normalized;
+}
+
+# Recursively scans extracted structure to guarantee that pure exclusion subgroups are assigned 'all-of'
+sub enforce_exclusion_subgroup_logic {
+    my ($group) = @_;
+    return unless ref $group eq 'HASH';
+
+    my $characteristics = $group->{characteristics} // [];
+    my $has_exclusions = 0;
+    my $has_inclusions = 0;
+
+    foreach my $char (@$characteristics) {
+        if (exists $char->{symptom}) {
+            my $ex = $char->{symptom}{exclude};
+            my $is_exclude = (ref $ex ? $$ex : $ex) ? 1 : 0;
+            if ($is_exclude) {
+                $has_exclusions = 1;
+            } else {
+                $has_inclusions = 1;
+            }
+        }
+        elsif (exists $char->{subgroup}) {
+            enforce_exclusion_subgroup_logic($char->{subgroup});
+            if (subgroup_has_exclusions($char->{subgroup})) {
+                $has_exclusions = 1;
+            }
+        }
+    }
+
+    if ($has_exclusions && !$has_inclusions) {
+        $group->{combinationMethod} = 'all-of';
+    }
+}
+
+# Helper to verify if a subgroup contains exclusion flags
+sub subgroup_has_exclusions {
+    my ($group) = @_;
+    return 0 unless ref $group eq 'HASH';
+    my $characteristics = $group->{characteristics} // [];
+    foreach my $char (@$characteristics) {
+        if (exists $char->{symptom}) {
+            my $ex = $char->{symptom}{exclude};
+            return 1 if (ref $ex ? $$ex : $ex);
+        }
+        elsif (exists $char->{subgroup}) {
+            return 1 if subgroup_has_exclusions($char->{subgroup});
+        }
+    }
+    return 0;
 }
 
 helper format_hpo_id => sub {
@@ -631,7 +679,10 @@ post '/DBB/extract_fhir_inex_criteria' => sub {
             ]
         };
 
-        # Übergebe die Mock-Daten an die HPO-Asynchron-Mapping Pipeline
+        # Run protective logic to make sure the mock structure stays clean
+        enforce_exclusion_subgroup_logic($mock_data);
+
+        # Pass mock data to map pipeline
         return $c->map_hierarchical_group_async($mock_data)->then(sub {
             my $mapped_group = shift;
             if ($c->tx && !$c->tx->is_finished) {
@@ -647,19 +698,26 @@ post '/DBB/extract_fhir_inex_criteria' => sub {
     }
 
     # =========================================================
-    # REALE LLM EXTRAKTION (PRODUKTIV-PFAD)
+    # REAL LLM EXTRACTION
     # =========================================================
     my $sys_instruction = "You are an expert medical entity extraction assistant. "
-    . "Your job is to analyze the patient clinical synopsis and extract patient phenotypic features into a logical nested group structure. "
-    . "Group the clinical symptoms into logical blocks using 'all-of' (AND) and 'any-of' (OR) relationships. "
-    . "Set the 'exclude' flag to true for symptoms listed under Exclusion Criteria (must NOT be present), and to false for symptoms listed under Inclusion Criteria. "
-    . "You must output raw JSON ONLY conforming strictly to the requested schema. "
-    . "Do not write any introductory text, explanation, or markdown backticks outside of the raw JSON payload.";
+    . "Your task is to analyze the clinical trial synopsis and extract phenotypic features into a logical nested group structure.\n\n"
+    . "LOGICAL GROUPING RULES:\n"
+    . "1. INCLUSION VS EXCLUSION FLAGS: Set 'exclude': false for symptoms listed under Inclusion Criteria. Set 'exclude': true for symptoms listed under Exclusion Criteria.\n"
+    . "2. EXCLUSION GROUPING: Group all exclusion criteria together in their own dedicated subgroup.\n"
+    . "3. EXCLUSION OPERATOR (CRITICAL): Subgroups containing exclusion criteria elements ('exclude': true) MUST use 'combinationMethod': 'all-of'. "
+    . "Mathematically, to reject a patient who has any of the excluded features, they must satisfy: (NOT Feature A) AND (NOT Feature B) AND (NOT Feature C). "
+    . "Therefore, combining exclusion elements requires an 'all-of' combination method. Never use 'any-of' for an exclusion subgroup.\n"
+    . "4. INCLUSION OPERATORS: Use 'all-of' (AND) to group mandatory inclusion criteria, and 'any-of' (OR) to group optional alternative symptoms.\n\n"
+    . "You must output raw JSON ONLY conforming strictly to the requested schema. Do not write introductory text, explanations, or markdown formatting outside the JSON payload.";
 
     my $user_prompt = "Analyze the study protocol text, identify the inclusion/exclusion requirements, group them logically into subgroups, and extract nested criteria accordingly.";
 
     $c->extract_structured_data_async($text_content, $hierarchical_group_schema, $sys_instruction, $user_prompt, $selected_model)->then(sub {
         my $extracted_data = shift;
+
+        # Enforce validation on exclusion subgroups post-extraction
+        enforce_exclusion_subgroup_logic($extracted_data);
 
         return $c->map_hierarchical_group_async($extracted_data)->then(sub {
             my $mapped_group = shift;
