@@ -164,7 +164,8 @@
 
     CPString            _symptomText;
     BOOL                _exclude;
-    CPString            _combinationMethod;
+    CPString            _presenceMode;
+    CPString            _combinationMethod @accessors(property=combinationMethod);
     int                 _indentation       @accessors(property=indentation);
 
     CPTokenField        _tokenField        @accessors(property=tokenField);
@@ -182,6 +183,7 @@
         _rowType = CPRuleEditorRowTypeSimple;
         _symptomText = @"";
         _exclude = NO;
+        _presenceMode = @"all-present";
         _combinationMethod = @"all-of";
         _indentation = 0;
         _hpoTokens = [];
@@ -211,11 +213,27 @@
     return _symptomText;
 }
 
+- (void)setPresenceMode:(CPString)mode
+{
+    if (_presenceMode !== mode)
+    {
+        _presenceMode = mode;
+        _exclude = [mode isEqualToString:@"neither-present"];
+        [self updateCriteriaAndDisplayValues];
+    }
+}
+
+- (CPString)presenceMode
+{
+    return _presenceMode;
+}
+
 - (void)setExclude:(BOOL)exclude
 {
     if (_exclude !== exclude)
     {
         _exclude = exclude;
+        _presenceMode = _exclude ? @"neither-present" : @"all-present";
         [self updateCriteriaAndDisplayValues];
     }
 }
@@ -258,7 +276,8 @@
             if ([_criteria count] > 1)
             {
                 var second = [_criteria objectAtIndex:1];
-                _exclude = [second isEqualToString:@"exclusion"];
+                _presenceMode = second;
+                _exclude = [second isEqualToString:@"neither-present"];
             }
         }
     }
@@ -276,10 +295,18 @@
     }
     else
     {
-        var presence = _exclude ? @"exclusion" : @"inclusion";
-        var dispPresence = _exclude ? @"Must NOT be present (Exclusion)" : @"Must be present (Inclusion)";
+        if (!_presenceMode) {
+            _presenceMode = _exclude ? @"neither-present" : @"all-present";
+        }
+        
+        var dispPresence = @"All must be present";
+        if (_presenceMode === @"any-present") {
+            dispPresence = @"Any must be present";
+        } else if (_presenceMode === @"neither-present") {
+            dispPresence = @"Neither must be present";
+        }
 
-        [self setCriteria:[CPArray arrayWithObjects:@"phenotype", presence, @"_value_field_", nil]];
+        [self setCriteria:[CPArray arrayWithObjects:@"phenotype", _presenceMode, @"_value_field_", nil]];
         [self setDisplayValues:[CPArray arrayWithObjects:@"Symptom / Phenotype", dispPresence, @"_value_field_", nil]];
     }
 }
@@ -375,8 +402,8 @@
     if (rowType === CPRuleEditorRowTypeSimple)
     {
         if (criterion == nil) return 1; // "Phenotypic Feature"
-        if (criterion == @"phenotype") return 2; // "Inclusion" vs "Exclusion"
-        if (criterion == @"inclusion" || criterion == @"exclusion") return 1; // token field input placeholder
+        if (criterion == @"phenotype") return 3; // "All", "Any", "Neither"
+        if (criterion == @"all-present" || criterion == @"any-present" || criterion == @"neither-present") return 1; // token field input placeholder
     }
     return 0;
 }
@@ -395,9 +422,9 @@
         return @"phenotype";
 
     if (criterion == @"phenotype")
-        return (index == 0) ? @"inclusion" : @"exclusion";
+        return (index == 0) ? @"all-present" : ((index == 1) ? @"any-present" : @"neither-present");
 
-    if (criterion == @"inclusion" || criterion == @"exclusion")
+    if (criterion == @"all-present" || criterion == @"any-present" || criterion == @"neither-present")
         return @"_value_field_";
 
     return nil;
@@ -410,8 +437,9 @@
     if (criterion === @"_logical_text_") return @"of the following are true";
 
     if (criterion == @"phenotype") return @"Symptom / Phenotype";
-    if (criterion == @"inclusion") return @"Must be present (Inclusion)";
-    if (criterion == @"exclusion") return @"Must NOT be present (Exclusion)";
+    if (criterion == @"all-present") return @"All must be present";
+    if (criterion == @"any-present") return @"Any must be present";
+    if (criterion == @"neither-present") return @"Neither must be present";
 
     if (criterion == @"_value_field_")
     {
@@ -430,7 +458,7 @@
             [tokenField setBackgroundColor:[CPColor whiteColor]];
             [tokenField setPlaceholderString:@"e.g., Corneal erosion"];
             
-            // CRITICAL FIX: Set delegate BEFORE populating object value to prevent "[object Object]" fallback
+            // Set delegate BEFORE populating object value to prevent fallback issues
             [tokenField setDelegate:_controller];
             
             // Populate tokens
@@ -467,13 +495,13 @@
     {
         [result setObject:[CPExpression expressionForKeyPath:@"phenotype"] forKey:CPRuleEditorPredicateLeftExpression];
     }
-    else if (criterion === @"inclusion")
+    else if (criterion === @"all-present" || criterion === @"any-present")
     {
         [result setObject:[CPNumber numberWithInt:CPEqualToPredicateOperatorType] forKey:CPRuleEditorPredicateOperatorType];
         [result setObject:[CPNumber numberWithInt:CPDirectPredicateModifier] forKey:CPRuleEditorPredicateComparisonModifier];
         [result setObject:[CPNumber numberWithInt:CPCaseInsensitivePredicateOption] forKey:CPRuleEditorPredicateOptions];
     }
-    else if (criterion === @"exclusion")
+    else if (criterion === @"neither-present")
     {
         [result setObject:[CPNumber numberWithInt:CPNotEqualToPredicateOperatorType] forKey:CPRuleEditorPredicateOperatorType];
         [result setObject:[CPNumber numberWithInt:CPDirectPredicateModifier] forKey:CPRuleEditorPredicateComparisonModifier];
@@ -957,14 +985,22 @@
         else if (item.symptom)
         {
             var sym = item.symptom;
+            
+            var tokens = [];
+            var rawLabels = sym.labels || (sym.label ? [sym.label] : []);
+            for (var k = 0; k < rawLabels.length; k++) {
+                tokens.push({
+                    "system": "http://human-phenotype-ontology.org",
+                    "code": "",
+                    "display": rawLabels[k]
+                });
+            }
+
             var fhirChar = {
                 "exclude": sym.exclude ? true : false,
+                "combinationMethod": fhirCharacteristics.length > 0 ? (sym.combinationMethod || "all-of") : (sym.exclude ? "neither-of" : "all-of"),
                 "valueCodeableConcept": {
-                    "coding": [{
-                        "system": "http://human-phenotype-ontology.org",
-                        "code": "",
-                        "display": sym.label || ""
-                    }]
+                    "coding": tokens
                 }
             };
             fhirCharacteristics.push(fhirChar);
@@ -1181,6 +1217,7 @@
 
         characteristics.push({
             "exclude": feat.exclude ? true : false,
+            "combinationMethod": feat.exclude ? "neither-of" : "all-of",
             "valueCodeableConcept": {
                 "coding": [{
                     "system": "http://human-phenotype-ontology.org",
@@ -1263,6 +1300,241 @@
     }
 }
 
+// Resolves references within the contained resources recursively, preparing subgroups inline
+- (id)resolveContainedReferencesInGroup:(id)rootGroup
+{
+    if (!rootGroup) return nil;
+    var contained = rootGroup.contained || [];
+    var containedMap = {};
+    for (var i = 0; i < contained.length; i++) {
+        var c = contained[i];
+        if (c.id) {
+            containedMap["#" + c.id] = c;
+        }
+    }
+    return [self resolveReferencesInItem:rootGroup withMap:containedMap];
+}
+
+- (id)resolveReferencesInItem:(id)item withMap:(id)containedMap
+{
+    if (!item || typeof item !== 'object') return item;
+    
+    if (item.valueReference && item.valueReference.reference) {
+        var ref = item.valueReference.reference;
+        var referenced = containedMap[ref];
+        if (referenced) {
+            var resolved = JSON.parse(JSON.stringify(referenced));
+            resolved.exclude = item.exclude ? true : false; // Propagate parent's exclusion flag down
+            return resolved;
+        }
+    }
+    
+    if (Array.isArray(item)) {
+        var arr = [];
+        for (var i = 0; i < item.length; i++) {
+            arr.push([self resolveReferencesInItem:item[i] withMap:containedMap]);
+        }
+        return arr;
+    }
+    
+    var keys = Object.keys(item);
+    var result = {};
+    for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        result[k] = [self resolveReferencesInItem:item[k] withMap:containedMap];
+    }
+    return result;
+}
+
+// Rebuilds deep composite subgroups and single characteristics recursively into FHIRCriteriaNodes
+- (FHIRCriteriaNode)nodeFromFHIRGroup:(id)group
+{
+    if (!group) return nil;
+
+    var node = [[FHIRCriteriaNode alloc] init];
+    
+    var isCompound = NO;
+    var combMethod = group.combinationMethod || "all-of";
+    var characteristics = group.characteristic || [];
+    
+    if (characteristics.length > 0 || group.resourceType === "Group")
+    {
+        isCompound = YES;
+    }
+    
+    if (isCompound)
+    {
+        [node setRowType:CPRuleEditorRowTypeCompound];
+        [node setCombinationMethod:combMethod];
+        [node updateCriteriaAndDisplayValues];
+        
+        var subrows = [CPMutableArray array];
+        for (var i = 0; i < characteristics.length; i++)
+        {
+            var charItem = characteristics[i];
+            var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
+            if (isSubgroup)
+            {
+                var subNode = [self nodeFromFHIRGroup:charItem];
+                if (subNode)
+                {
+                    [subrows addObject:subNode];
+                }
+            }
+            else
+            {
+                var subNode = [[FHIRCriteriaNode alloc] init];
+                [subNode setRowType:CPRuleEditorRowTypeSimple];
+                
+                var isExclude = (charItem.exclude === true);
+                var presenceMode = @"all-present";
+                if (isExclude || charItem.combinationMethod === "neither-of")
+                {
+                    presenceMode = @"neither-present";
+                }
+                else if (charItem.combinationMethod === "any-of")
+                {
+                    presenceMode = @"any-present";
+                }
+                [subNode setPresenceMode:presenceMode];
+                
+                var tokens = [];
+                var valueCodeableConcept = charItem.valueCodeableConcept;
+                if (valueCodeableConcept && valueCodeableConcept.coding)
+                {
+                    var codings = valueCodeableConcept.coding;
+                    for (var j = 0; j < codings.length; j++)
+                    {
+                        var coding = codings[j];
+                        var codeVal = coding.code || "";
+                        if (codeVal && codeVal.indexOf("[HPO_CODE_FOR_") !== 0)
+                        {
+                            tokens.push({
+                                "code": codeVal,
+                                "display": coding.display || codeVal
+                            });
+                        }
+                        else
+                        {
+                            tokens.push({
+                                "code": @"HP:0000118",
+                                "display": coding.display || @"Symptom"
+                            });
+                        }
+                    }
+                }
+                
+                [subNode setHpoTokens:tokens];
+                if (tokens.length > 0)
+                {
+                    [subNode setSymptomText:tokens[0].display];
+                }
+                
+                [subNode updateCriteriaAndDisplayValues];
+                [subrows addObject:subNode];
+            }
+        }
+        [node setSubrows:subrows];
+    }
+    else
+    {
+        [node setRowType:CPRuleEditorRowTypeSimple];
+        var isExclude = (group.exclude === true);
+        var presenceMode = @"all-present";
+        if (isExclude || group.combinationMethod === "neither-of")
+        {
+            presenceMode = @"neither-present";
+        }
+        else if (group.combinationMethod === "any-of")
+        {
+            presenceMode = @"any-present";
+        }
+        [node setPresenceMode:presenceMode];
+        
+        var tokens = [];
+        var valueCodeableConcept = group.valueCodeableConcept;
+        if (valueCodeableConcept && valueCodeableConcept.coding)
+        {
+            var codings = valueCodeableConcept.coding;
+            for (var j = 0; j < codings.length; j++)
+            {
+                var coding = codings[j];
+                var codeVal = coding.code || "";
+                if (codeVal && codeVal.indexOf("[HPO_CODE_FOR_") !== 0)
+                {
+                    tokens.push({
+                        "code": codeVal,
+                        "display": coding.display || codeVal
+                    });
+                }
+                else
+                {
+                    tokens.push({
+                        "code": @"HP:0000118",
+                        "display": coding.display || @"Symptom"
+                    });
+                }
+            }
+        }
+        [node setHpoTokens:tokens];
+        if (tokens.length > 0)
+        {
+            [node setSymptomText:tokens[0].display];
+        }
+        
+        [node updateCriteriaAndDisplayValues];
+    }
+    
+    return node;
+}
+
+- (void)importFHIRGroup:(id)rootGroup
+{
+    if (!rootGroup) return;
+    try
+    {
+        _isImportingJSON = YES;
+        console.log("DEBUG [Frontend Import] Incoming rootGroup payload: ", rootGroup);
+
+        // Resolve reference structures and inline deep composite subgroups
+        var resolvedGroup = [self resolveContainedReferencesInGroup:rootGroup];
+        var flattenedGroup = [self _flattenFHIRGroup:resolvedGroup];
+        var rootNode = [self nodeFromFHIRGroup:flattenedGroup];
+
+        var flatList = [CPMutableArray array];
+        if (rootNode)
+        {
+            var combinationMethod = flattenedGroup.combinationMethod || "all-of";
+            if (combinationMethod === "any-of")
+            {
+                [self flattenNode:rootNode depth:0 intoArray:flatList];
+            }
+            else
+            {
+                var children = [rootNode subrows];
+                for (var i = 0; i < [children count]; i++)
+                {
+                    [self flattenNode:children[i] depth:0 intoArray:flatList];
+                }
+            }
+        }
+
+        [self setRootNodes:flatList];
+        [self performSelector:@selector(_enableImporting) withObject:nil afterDelay:0];
+    }
+    catch (e)
+    {
+        console.error("[FHIR Error] Exception in structural reconstruction: ", e);
+        _isImportingJSON = NO;
+    }
+}
+
+- (void)_enableImporting
+{
+    _isImportingJSON = NO;
+    [self updateFHIRGroupRepresentation];
+}
+
 - (CPMutableDictionary)compileGroupFromFlatNodes:(CPArray)flatNodes
 {
     if ([flatNodes count] === 0) return [CPMutableDictionary dictionary];
@@ -1341,8 +1613,8 @@
             [containedArray addObject:subGroup];
 
             var refCharacteristic = [CPMutableDictionary dictionary];
-            [refCharacteristic setObject:@{ @"text": @"Logical subgroup" } forKey:@"code"];
-            [refCharacteristic setObject:@{ @"reference": "#" + subgroupID } forKey:@"valueReference"];
+            [refCharacteristic setObject:{ "text": @"Logical subgroup" } forKey:@"code"];
+            [refCharacteristic setObject:{ "reference": "#" + subgroupID } forKey:@"valueReference"];
             [refCharacteristic setObject:NO forKey:@"exclude"];
 
             [characteristics addObject:refCharacteristic];
@@ -1351,13 +1623,66 @@
         {
             var tokenField = [childNode tokenField];
             var tokens = tokenField ? [tokenField objectValue] : [];
-            var codings = [];
-
-            if (tokens.length > 0)
+            
+            // Multiple Tokens: Compile as a contained composite subgroup
+            if (tokens.length > 1)
             {
+                subgroupCounter.value = subgroupCounter.value + 1;
+                var compositeID = "composite-symptom-" + subgroupCounter.value;
+                
+                var subGroup = [CPMutableDictionary dictionary];
+                [subGroup setObject:@"Group" forKey:@"resourceType"];
+                [subGroup setObject:compositeID forKey:@"id"];
+                [subGroup setObject:@"conceptual" forKey:@"membership"];
+                [subGroup setObject:@"person" forKey:@"type"];
+                [subGroup setObject:@"all-of" forKey:@"combinationMethod"];
+                
+                var subCharacteristics = [CPMutableArray array];
                 for (var k = 0; k < tokens.length; k++)
                 {
                     var tok = tokens[k];
+                    var subCharItem = [CPMutableDictionary dictionary];
+                    [subCharItem setObject:{
+                        "coding": [
+                            {
+                                "system": "http://snomed.info/sct",
+                                "code": "8116006",
+                                "display": "Phänotypisches Merkmal"
+                            }
+                        ]
+                    } forKey:@"code"];
+                    
+                    var codings = [{
+                        "system": "http://human-phenotype-ontology.org",
+                        "code": tok.code,
+                        "display": tok.display
+                    }];
+                    
+                    [subCharItem setObject:{"coding": codings} forKey:@"valueCodeableConcept"];
+                    [subCharItem setObject:NO forKey:@"exclude"];
+                    [subCharItem setObject:@"all-of" forKey:@"combinationMethod"];
+                    
+                    [subCharacteristics addObject:subCharItem];
+                }
+                [subGroup setObject:subCharacteristics forKey:@"characteristic"];
+                [containedArray addObject:subGroup];
+                
+                var refCharacteristic = [CPMutableDictionary dictionary];
+                [refCharacteristic setObject:{"text": "Composite Logical subgroup"} forKey:@"code"];
+                [refCharacteristic setObject:{"reference": "#" + compositeID} forKey:@"valueReference"];
+                
+                var isExclude = [[childNode presenceMode] isEqualToString:@"neither-present"];
+                [refCharacteristic setObject:isExclude forKey:@"exclude"];
+                
+                [characteristics addObject:refCharacteristic];
+            }
+            else
+            {
+                // Single Token (Standard fallback pipeline)
+                var codings = [];
+                if (tokens.length > 0)
+                {
+                    var tok = tokens[0];
                     if (tok && tok.code)
                     {
                         codings.push({
@@ -1367,100 +1692,53 @@
                         });
                     }
                 }
+                else
+                {
+                    var rawText = [childNode symptomText] || @"";
+                    var clinicalTerm = [rawText stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
+                    var hpoTermName = [clinicalTerm isEqualToString:@""] ? @"UNDEFINED" : clinicalTerm;
+
+                    var formattedTerm = hpoTermName.toUpperCase().replace(/\s+/g, '_');
+                    var hpoCodePlaceholder = "[HPO_CODE_FOR_" + formattedTerm + "]";
+
+                    codings.push({
+                        "system": "http://human-phenotype-ontology.org",
+                        "code": hpoCodePlaceholder,
+                        "display": hpoTermName
+                    });
+                }
+
+                var charItem = [CPMutableDictionary dictionary];
+                [charItem setObject:{
+                    "coding": [
+                        {
+                            "system": "http://snomed.info/sct",
+                            "code": "8116006",
+                            "display": "Phänotypisches Merkmal"
+                        }
+                    ]
+                } forKey:@"code"];
+
+                [charItem setObject:{"coding": codings} forKey:@"valueCodeableConcept"];
+                
+                var isExclude = [[childNode presenceMode] isEqualToString:@"neither-present"];
+                [charItem setObject:isExclude forKey:@"exclude"];
+                
+                var combMethod = @"all-of";
+                if ([[childNode presenceMode] isEqualToString:@"any-present"]) {
+                    combMethod = @"any-of";
+                } else if ([[childNode presenceMode] isEqualToString:@"neither-present"]) {
+                    combMethod = @"neither-of";
+                }
+                [charItem setObject:combMethod forKey:@"combinationMethod"];
+
+                [characteristics addObject:charItem];
             }
-            else
-            {
-                var rawText = [childNode symptomText] || @"";
-                var clinicalTerm = [rawText stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
-                var hpoTermName = [clinicalTerm isEqualToString:@""] ? @"UNDEFINED" : clinicalTerm;
-
-                var formattedTerm = hpoTermName.toUpperCase().replace(/\s+/g, '_');
-                var hpoCodePlaceholder = "[HPO_CODE_FOR_" + formattedTerm + "]";
-
-                codings.push({
-                    "system": "http://human-phenotype-ontology.org",
-                    "code": hpoCodePlaceholder,
-                    "display": hpoTermName
-                });
-            }
-
-            var charItem = [CPMutableDictionary dictionary];
-
-            [charItem setObject:@{
-                @"coding": [
-                    @{
-                        @"system": @"http://snomed.info/sct",
-                        @"code": @"8116006",
-                        @"display": @"Phänotypisches Merkmal"
-                    }
-                ]
-            } forKey:@"code"];
-
-            [charItem setObject:@{ @"coding": codings } forKey:@"valueCodeableConcept"];
-            [charItem setObject:[childNode exclude] forKey:@"exclude"];
-
-            [characteristics addObject:charItem];
         }
     }
 
     [group setObject:characteristics forKey:@"characteristic"];
     return group;
-}
-
-- (FHIRCriteriaNode)nodeFromFHIRGroup:(id)group
-{
-    if (!group) return nil;
-
-    var node = [[FHIRCriteriaNode alloc] init];
-    [node setRowType:CPRuleEditorRowTypeCompound];
-    [node setCombinationMethod:group.combinationMethod || @"all-of"];
-
-    var characteristics = group.characteristic || [];
-    for (var i = 0; i < characteristics.length; i++)
-    {
-        var charItem = characteristics[i];
-        if (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod)
-        {
-            var childNode = [self nodeFromFHIRGroup:charItem];
-            if (childNode)
-            {
-                [[node subrows] addObject:childNode];
-            }
-        }
-        else
-        {
-            var childNode = [[FHIRCriteriaNode alloc] init];
-            [childNode setRowType:CPRuleEditorRowTypeSimple];
-            [childNode setExclude:charItem.exclude ? YES : NO];
-
-            var hpoTokens = [];
-            var valCodeableConcept = charItem.valueCodeableConcept;
-            if (valCodeableConcept && valCodeableConcept.coding)
-            {
-                var codings = valCodeableConcept.coding;
-                for (var k = 0; k < codings.length; k++)
-                {
-                    var coding = codings[k];
-                    hpoTokens.push({
-                        "code": coding.code || "HP:0000118",
-                        "display": coding.display || "Phenotypic feature"
-                    });
-                }
-            }
-
-            [childNode setHpoTokens:hpoTokens];
-            if (hpoTokens.length > 0)
-            {
-                [childNode setSymptomText:hpoTokens[0].display];
-            }
-
-            [childNode updateCriteriaAndDisplayValues];
-            [[node subrows] addObject:childNode];
-        }
-    }
-
-    [node updateCriteriaAndDisplayValues];
-    return node;
 }
 
 - (BOOL)_groupContainsExclusions:(id)group
@@ -1471,7 +1749,7 @@
     for (var i = 0; i < characteristics.length; i++)
     {
         var charItem = characteristics[i];
-        if (charItem.exclude === true)
+        if (charItem.exclude === true || charItem.combinationMethod === "neither-of")
             return YES;
 
         var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
@@ -1500,7 +1778,8 @@
         {
             var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
             var shouldFlatten = (flattenedSubgroup.combinationMethod === group.combinationMethod) && 
-                                ![self _groupContainsExclusions:flattenedSubgroup];
+                                ![self _groupContainsExclusions:flattenedSubgroup] && 
+                                !(flattenedSubgroup.id && [flattenedSubgroup.id hasPrefix:@"composite-"]);
 
             if (shouldFlatten)
             {
@@ -1523,51 +1802,6 @@
 
     group.characteristic = flattenedCharacteristics;
     return group;
-}
-
-- (void)importFHIRGroup:(id)rootGroup
-{
-    if (!rootGroup) return;
-    try
-    {
-        _isImportingJSON = YES;
-        console.log("DEBUG [Frontend Import] Incoming rootGroup payload: ", rootGroup);
-
-        var flattenedGroup = [self _flattenFHIRGroup:rootGroup];
-        var rootNode = [self nodeFromFHIRGroup:flattenedGroup];
-
-        var flatList = [CPMutableArray array];
-        if (rootNode)
-        {
-            var combinationMethod = flattenedGroup.combinationMethod || "all-of";
-            if (combinationMethod === "any-of")
-            {
-                [self flattenNode:rootNode depth:0 intoArray:flatList];
-            }
-            else
-            {
-                var children = [rootNode subrows];
-                for (var i = 0; i < [children count]; i++)
-                {
-                    [self flattenNode:children[i] depth:0 intoArray:flatList];
-                }
-            }
-        }
-
-        [self setRootNodes:flatList];
-        [self performSelector:@selector(_enableImporting) withObject:nil afterDelay:0];
-    }
-    catch (e)
-    {
-        console.error("[FHIR Error] Exception in structural reconstruction: ", e);
-        _isImportingJSON = NO;
-    }
-}
-
-- (void)_enableImporting
-{
-    _isImportingJSON = NO;
-    [self updateFHIRGroupRepresentation];
 }
 
 // --------------------------------------------------------------------------------
