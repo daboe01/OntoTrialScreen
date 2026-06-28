@@ -6,6 +6,42 @@
 @import <Foundation/Foundation.j>
 @import <AppKit/AppKit.j>
 
+// --------------------------------------------------------------------------------
+// HPOOutlineView Subclass (Supports dragging while keeping TreeController Bindings)
+// --------------------------------------------------------------------------------
+
+@implementation HPOOutlineView : CPOutlineView
+
+- (void)mouseDragged:(CPEvent)anEvent
+{
+    var selectedRow = [self selectedRow];
+    if (selectedRow === -1) return;
+    
+    var item = [self itemAtRow:selectedRow];  // CPTreeNode wrapping the model when bound
+    var node = item ? [item representedObject] : nil; // HPONode model object
+    if (!node || [node name] === @"Loading...") return;
+
+    var termId = [node termId];
+    var formattedId = "HP:" + [CPString stringWithFormat:"%07d", termId + 0];
+    var dict = { "code": formattedId, "display": [node name] };
+
+    var pboard = [CPPasteboard pasteboardWithName:CPDragPboard];
+    [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
+    [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
+    [pboard setString:formattedId forType:CPStringPboardType];
+
+    var dragView = [[CPView alloc] initWithFrame:CGRectMake(0, 0, 150, 20)];
+    [self dragView:dragView
+                at:CGPointMakeZero()
+            offset:CGSizeMakeZero()
+             event:anEvent
+        pasteboard:pboard
+            source:self
+         slideBack:YES];
+}
+
+@end
+
 // Helper to allow native JS object serialization to work nicely in Cappuccino
 @implementation CPDictionary (JSONHelper)
 - (id)JSObject
@@ -152,6 +188,77 @@
 @end
 
 // --------------------------------------------------------------------------------
+// HPOTokenField Subclass (With Native Drag-and-Drop Drop Target Implementation)
+// --------------------------------------------------------------------------------
+
+@implementation HPOTokenField : CPTokenField
+{
+    id _editorController;
+}
+
+- (void)setEditorController:(id)aController
+{
+    _editorController = aController;
+}
+
+- (CPDragOperation)draggingEntered:(id <CPDraggingInfo>)sender
+{
+    var pboard = [sender draggingPasteboard];
+    if ([[pboard types] containsObject:@"HPOTermPboardType"])
+    {
+        return CPDragOperationCopy;
+    }
+    return CPDragOperationNone;
+}
+
+- (CPDragOperation)draggingUpdated:(id <CPDraggingInfo>)sender
+{
+    var pboard = [sender draggingPasteboard];
+    if ([[pboard types] containsObject:@"HPOTermPboardType"])
+    {
+        return CPDragOperationCopy;
+    }
+    return CPDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id <CPDraggingInfo>)sender
+{
+    var pboard = [sender draggingPasteboard];
+    if ([[pboard types] containsObject:@"HPOTermPboardType"])
+    {
+        var dict = [pboard propertyListForType:@"HPOTermPboardType"];
+        if (dict)
+        {
+            var tokens = [self objectValue] || [];
+            var exists = NO;
+            for (var i = 0; i < tokens.length; i++)
+            {
+                if (tokens[i].code === dict.code)
+                {
+                    exists = YES;
+                    break;
+                }
+            }
+            if (!exists)
+            {
+                var mutableTokens = [CPMutableArray arrayWithArray:tokens];
+                [mutableTokens addObject:dict];
+                [self setObjectValue:mutableTokens];
+                
+                if (_editorController)
+                {
+                    [_editorController ruleEditorDidChange:self];
+                }
+            }
+            return YES;
+        }
+    }
+    return NO;
+}
+
+@end
+
+// --------------------------------------------------------------------------------
 // FHIRCriteriaNode (Structured MVC Row Model)
 // --------------------------------------------------------------------------------
 
@@ -168,7 +275,7 @@
     CPString            _combinationMethod @accessors(property=combinationMethod);
     int                 _indentation       @accessors(property=indentation);
 
-    CPTokenField        _tokenField        @accessors(property=tokenField);
+    HPOTokenField       _tokenField        @accessors(property=tokenField);
     CPArray             _hpoTokens         @accessors(property=hpoTokens);
 }
 
@@ -358,7 +465,6 @@
     return node ? [node indentation] : 0;
 }
 
-// Add this helper method so 'self' can resolve it during depth queries
 - (id)nodeAtRowIndex:(int)rowIndex
 {
     if (rowIndex < 0 || rowIndex >= [self numberOfRows])
@@ -452,13 +558,15 @@
                 return cachedField;
             }
 
-            var tokenField = [[CPTokenField alloc] initWithFrame:CGRectMake(0, 0, 320, 24)];
+            var tokenField = [[HPOTokenField alloc] initWithFrame:CGRectMake(0, 0, 320, 24)];
+            [tokenField setEditorController:_controller];
+            [tokenField registerForDraggedTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", nil]];
+            
             [tokenField setEditable:YES];
             [tokenField setBezeled:YES];
             [tokenField setBackgroundColor:[CPColor whiteColor]];
-            [tokenField setPlaceholderString:@"e.g., Corneal erosion"];
+            [tokenField setPlaceholderString:@"Drag and drop HPO codes here..."];
             
-            // Set delegate BEFORE populating object value to prevent fallback issues
             [tokenField setDelegate:_controller];
             
             // Populate tokens
@@ -526,7 +634,7 @@
 {
     CPTabView            _tabView;
 
-    // TAB 1: FHIR Criteria Editor
+    // Workspace Pane
     FHIRRuleEditor       _ruleEditor;
     FHIRRuleDelegate     _ruleDelegate;
     CPTextView           _synopsisInputTextView;
@@ -544,7 +652,7 @@
     CPMutableArray       _rootNodes          @accessors(property=rootNodes);
     BOOL                 _isImportingJSON;
 
-    // TAB 2: HPO Tree Browser
+    // Embedded HPO Tree Browser (Positioned below the Rule Editor)
     CPTreeController     treeController;
     CPOutlineView        outlineView;
     CPTextView           definitionTextView;
@@ -567,7 +675,7 @@
 
 - (void)applicationDidFinishLaunching:(CPNotification)aNotification
 {
-    var theWindow = [[CPWindow alloc] initWithContentRect:CGRectMake(0, 0, 1000, 750) styleMask:CPBorderlessBridgeWindowMask];
+    var theWindow = [[CPWindow alloc] initWithContentRect:CGRectMake(0, 0, 1100, 850) styleMask:CPBorderlessBridgeWindowMask];
     [theWindow setTitle:@"Clinical Trial Eligibility & HPO Suite"];
     [theWindow center];
 
@@ -583,8 +691,7 @@
     _jsonTextView = [[CPTextView alloc] initWithFrame:CGRectMakeZero()];
     [_jsonTextView setDelegate:self];
 
-    [self _buildFHIRTab];
-    [self _buildHPOTab];
+    [self _buildIntegratedWorkspace];
 
     [theWindow orderFront:self];
     [self fetchRoots];
@@ -619,29 +726,74 @@
 }
 
 // --------------------------------------------------------------------------------
-// Tab Layout Builders
+// Native Drag Source implementation for HPO Hierarchy elements
 // --------------------------------------------------------------------------------
 
-- (void)_buildFHIRTab
+- (BOOL)outlineView:(CPOutlineView)anOutlineView writeItems:(CPArray)items toPasteboard:(CPPasteboard)pboard
 {
-    var tab1 = [[CPTabViewItem alloc] initWithIdentifier:@"fhirTab"];
-    [tab1 setLabel:@"FHIR Criteria Editor"];
+    if ([items count] === 0) return NO;
+    var treeNode = [items objectAtIndex:0];
+    var node = [treeNode representedObject];
+    if (!node || [node name] === @"Loading...") return NO;
 
-    var tab1View = [[CPView alloc] initWithFrame:[_tabView bounds]];
-    [tab1 setView:tab1View];
-    [_tabView addTabViewItem:tab1];
+    var termId = [node termId];
+    var formattedId = "HP:" + [CPString stringWithFormat:"%07d", termId + 0];
+    
+    var dict = { "code": formattedId, "display": [node name] };
+    [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
+    [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
+    [pboard setString:formattedId forType:CPStringPboardType];
+    return YES;
+}
 
-    var splitView = [[CPSplitView alloc] initWithFrame:[tab1View bounds]];
-    [splitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-    [splitView setVertical:YES];
+- (BOOL)tableView:(CPTableView)aTableView writeRowsWithIndexes:(CPIndexSet)rowIndexes toPasteboard:(CPPasteboard)pboard
+{
+    if (aTableView === downstreamTableView)
+    {
+        var clickedRow = [rowIndexes firstIndex];
+        if (clickedRow === CPNotFound || clickedRow >= [_downstreamTerms count]) return NO;
 
-    var leftWidth = CGRectGetWidth([tab1View bounds]) * 0.35;
-    var rightWidth = CGRectGetWidth([tab1View bounds]) - leftWidth - [splitView dividerThickness];
+        var term = _downstreamTerms[clickedRow];
+        var formattedId = "HP:" + [CPString stringWithFormat:"%07d", term.id + 0];
+        
+        var dict = { "code": formattedId, "display": term.label };
+        [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
+        [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
+        [pboard setString:formattedId forType:CPStringPboardType];
+        return YES;
+    }
+    return NO;
+}
 
-    var leftContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, leftWidth, CGRectGetHeight([tab1View bounds]))];
+// --------------------------------------------------------------------------------
+// Integrated Unified Workspace Layout Builder
+// --------------------------------------------------------------------------------
+
+- (void)_buildIntegratedWorkspace
+{
+    var mainTab = [[CPTabViewItem alloc] initWithIdentifier:@"workspaceTab"];
+    [mainTab setLabel:@"Clinical Eligibility & HPO Workspace"];
+
+    var tabViewBounds = [_tabView bounds];
+    var mainView = [[CPView alloc] initWithFrame:tabViewBounds];
+    [mainTab setView:mainView];
+    [_tabView addTabViewItem:mainTab];
+
+    var mainSplitView = [[CPSplitView alloc] initWithFrame:[mainView bounds]];
+    [mainSplitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [mainSplitView setVertical:YES];
+    
+    // ADD THIS LINE TO RENDER THE INTERFACE
+    [mainView addSubview:mainSplitView]; 
+
+    var leftWidth = CGRectGetWidth([mainView bounds]) * 0.35;
+    var rightWidth = CGRectGetWidth([mainView bounds]) - leftWidth - [mainSplitView dividerThickness];
+
+    // Left Column: Clinical protocol synopsis panel
+    var leftContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, leftWidth, CGRectGetHeight([mainView bounds]))];
     [leftContainer setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
-    var synopsisBox = [[CPBox alloc] initWithFrame:CGRectMake(10, 10, leftWidth - 20, CGRectGetHeight([tab1View bounds]) - 160)];
+    var synopsisBox = [[CPBox alloc] initWithFrame:CGRectMake(10, 10, leftWidth - 20, CGRectGetHeight([mainView bounds]) - 160)];
     [synopsisBox setTitle:@"Clinical Study Synopsis / Protocol Text"];
     [synopsisBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
@@ -673,7 +825,7 @@
     [[synopsisBox contentView] addSubview:synScroll];
     [leftContainer addSubview:synopsisBox];
 
-    var settingsBox = [[CPBox alloc] initWithFrame:CGRectMake(10, CGRectGetHeight([tab1View bounds]) - 145, leftWidth - 20, 105)];
+    var settingsBox = [[CPBox alloc] initWithFrame:CGRectMake(10, CGRectGetHeight([mainView bounds]) - 145, leftWidth - 20, 105)];
     [settingsBox setTitle:@"Cognitive Processing Extraction"];
     [settingsBox setAutoresizingMask:CPViewWidthSizable | CPViewMinYMargin];
 
@@ -696,10 +848,21 @@
     [[settingsBox contentView] addSubview:_extractButton];
     [leftContainer addSubview:settingsBox];
 
-    var rightContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, CGRectGetHeight([tab1View bounds]))];
+    // Right Column: Split layout (Rule Editor at the top, HPO Hierarchy Browser below)
+    var rightContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, CGRectGetHeight([mainView bounds]))];
     [rightContainer setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
-    var ruleBox = [[CPBox alloc] initWithFrame:CGRectMake(10, 10, rightWidth - 20, CGRectGetHeight([tab1View bounds]) - 65)];
+    var rightSplitView = [[CPSplitView alloc] initWithFrame:[rightContainer bounds]];
+    [rightSplitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [rightSplitView setVertical:NO]; // Split horizontally, creating top and bottom halves
+
+    var initialTopHeight = CGRectGetHeight([rightContainer bounds]) * 0.42;
+
+    // Right Top: Rule Editor
+    var topPane = [[CPView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, initialTopHeight)];
+    [topPane setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+
+    var ruleBox = [[CPBox alloc] initWithFrame:CGRectMake(10, 10, rightWidth - 20, initialTopHeight - 55)];
     [ruleBox setTitle:@"Logical Eligibility Framework"];
     [ruleBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
@@ -730,141 +893,138 @@
 
     [ruleScrollView setDocumentView:_ruleEditor];
     [[ruleBox contentView] addSubview:ruleScrollView];
-    [rightContainer addSubview:ruleBox];
+    [topPane addSubview:ruleBox];
 
-    var btnY = CGRectGetHeight([tab1View bounds]) - 45;
+    var btnY = initialTopHeight - 38;
     _addRuleBtn = [[CPButton alloc] initWithFrame:CGRectMake(15, btnY, 110, 24)];
     [_addRuleBtn setTitle:@"Add Criterion"];
     [_addRuleBtn setTarget:self];
     [_addRuleBtn setAction:@selector(addSimpleRule:)];
     [_addRuleBtn setAutoresizingMask:CPViewMinYMargin];
-    [rightContainer addSubview:_addRuleBtn];
+    [topPane addSubview:_addRuleBtn];
 
     _addGroupBtn = [[CPButton alloc] initWithFrame:CGRectMake(135, btnY, 110, 24)];
     [_addGroupBtn setTitle:@"Add Group"];
     [_addGroupBtn setTarget:self];
     [_addGroupBtn setAction:@selector(addGroupRule:)];
     [_addGroupBtn setAutoresizingMask:CPViewMinYMargin];
-    [rightContainer addSubview:_addGroupBtn];
+    [topPane addSubview:_addGroupBtn];
 
     _clearBtn = [[CPButton alloc] initWithFrame:CGRectMake(255, btnY, 80, 24)];
     [_clearBtn setTitle:@"Reset"];
     [_clearBtn setTarget:self];
     [_clearBtn setAction:@selector(resetEditor:)];
     [_clearBtn setAutoresizingMask:CPViewMinYMargin];
-    [rightContainer addSubview:_clearBtn];
+    [topPane addSubview:_clearBtn];
 
     _showJsonBtn = [[CPButton alloc] initWithFrame:CGRectMake(rightWidth - 195, btnY, 180, 24)];
     [_showJsonBtn setTitle:@"View FHIR R6 JSON"];
     [_showJsonBtn setTarget:self];
     [_showJsonBtn setAction:@selector(showJSONPopover:)];
     [_showJsonBtn setAutoresizingMask:CPViewMinYMargin | CPViewMinXMargin];
-    [rightContainer addSubview:_showJsonBtn];
+    [topPane addSubview:_showJsonBtn];
 
-    [splitView addSubview:leftContainer];
-    [splitView addSubview:rightContainer];
-    [tab1View addSubview:splitView];
+    // Right Bottom: Integrated HPO Hierarchy Browser
+    var initialBottomHeight = CGRectGetHeight([rightContainer bounds]) - initialTopHeight - [rightSplitView dividerThickness];
+    var bottomPane = [[CPView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, initialBottomHeight)];
+    [bottomPane setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
-    [self resetEditor:self];
+    var browserBox = [[CPBox alloc] initWithFrame:CGRectMake(10, 10, rightWidth - 20, initialBottomHeight - 20)];
+    [browserBox setTitle:@"HPO Term Browser (Drag nodes or downstream items into criteria above)"];
+    [browserBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [bottomPane addSubview:browserBox];
 
-    [[CPNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(ruleEditorDidChange:)
-                                                 name:CPRuleEditorRowsDidChangeNotification
-                                               object:_ruleEditor];
-}
+    var bBoxBounds = [[browserBox contentView] bounds];
 
-- (void)_buildHPOTab
-{
-    var tab2 = [[CPTabViewItem alloc] initWithIdentifier:@"hpoTab"];
-    [tab2 setLabel:@"HPO Hierarchy Browser"];
-
-    var tab2View = [[CPView alloc] initWithFrame:[_tabView bounds]];
-    [tab2 setView:tab2View];
-    [_tabView addTabViewItem:tab2];
-
-    var bounds = [tab2View bounds];
-
-    treeController = [[CPTreeController alloc] init];
-    [treeController setChildrenKeyPath:@"children"];
-    [treeController setLeafKeyPath:@"isLeaf"];
-
-    _synonyms = [];
-    _xrefs = [];
-    _downstreamTerms = [];
-    _matchedIndexPaths = [];
-    _currentMatchIndex = -1;
-
-    var topWidth = CGRectGetWidth(bounds) - 40;
-    var searchFieldWidth = topWidth - 270;
-
-    _searchField = [[CPSearchField alloc] initWithFrame:CGRectMake(20, 10, searchFieldWidth, 30)];
+    // Search header inside the browser box
+    _searchField = [[CPSearchField alloc] initWithFrame:CGRectMake(10, 10, CGRectGetWidth(bBoxBounds) - 340, 26)];
     [_searchField setAutoresizingMask:CPViewWidthSizable | CPViewMaxYMargin];
     [_searchField setPlaceholderString:@"Search terms, synonyms, descriptions..."];
     [_searchField setTarget:self];
     [_searchField setAction:@selector(searchAction:)];
-    [tab2View addSubview:_searchField];
+    [[browserBox contentView] addSubview:_searchField];
 
-    _searchStatusLabel = [[CPTextField alloc] initWithFrame:CGRectMake(20 + searchFieldWidth + 10, 15, 60, 20)];
+    _searchStatusLabel = [[CPTextField alloc] initWithFrame:CGRectMake(CGRectGetWidth(bBoxBounds) - 325, 13, 60, 20)];
     [_searchStatusLabel setStringValue:@""];
     [_searchStatusLabel setAutoresizingMask:CPViewMinXMargin | CPViewMaxYMargin];
     [_searchStatusLabel setAlignment:CPRightTextAlignment];
-    [tab2View addSubview:_searchStatusLabel];
+    [[browserBox contentView] addSubview:_searchStatusLabel];
 
-    var prevBtn = [[CPButton alloc] initWithFrame:CGRectMake(20 + searchFieldWidth + 80, 13, 30, 24)];
+    var prevBtn = [[CPButton alloc] initWithFrame:CGRectMake(CGRectGetWidth(bBoxBounds) - 255, 11, 28, 24)];
     [prevBtn setTitle:@"<"];
     [prevBtn setAutoresizingMask:CPViewMinXMargin | CPViewMaxYMargin];
     [prevBtn setTarget:self];
     [prevBtn setAction:@selector(prevMatch:)];
-    [tab2View addSubview:prevBtn];
+    [[browserBox contentView] addSubview:prevBtn];
 
-    var nextBtn = [[CPButton alloc] initWithFrame:CGRectMake(20 + searchFieldWidth + 115, 13, 30, 24)];
+    var nextBtn = [[CPButton alloc] initWithFrame:CGRectMake(CGRectGetWidth(bBoxBounds) - 222, 11, 28, 24)];
     [nextBtn setTitle:@">"];
     [nextBtn setAutoresizingMask:CPViewMinXMargin | CPViewMaxYMargin];
     [nextBtn setTarget:self];
     [nextBtn setAction:@selector(nextMatch:)];
-    [tab2View addSubview:nextBtn];
+    [[browserBox contentView] addSubview:nextBtn];
 
-    _nameOnlyCheckbox = [[CPCheckBox alloc] initWithFrame:CGRectMake(20 + searchFieldWidth + 155, 15, 100, 20)];
+    _nameOnlyCheckbox = [[CPCheckBox alloc] initWithFrame:CGRectMake(CGRectGetWidth(bBoxBounds) - 185, 13, 100, 20)];
     [_nameOnlyCheckbox setTitle:@"Name only"];
     [_nameOnlyCheckbox setAutoresizingMask:CPViewMinXMargin | CPViewMaxYMargin];
     [_nameOnlyCheckbox setState:CPOffState];
-    [tab2View addSubview:_nameOnlyCheckbox];
+    [[browserBox contentView] addSubview:_nameOnlyCheckbox];
 
-    var splitViewHeight = CGRectGetHeight(bounds) - 90;
-    var splitView = [[CPSplitView alloc] initWithFrame:CGRectMake(20, 50, CGRectGetWidth(bounds) - 40, splitViewHeight)];
-    [splitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-    [splitView setVertical:YES];
+    // Inner Split: Left (Tree Structure) / Right (Analytical details)
+    var hpoInnerSplit = [[CPSplitView alloc] initWithFrame:CGRectMake(10, 45, CGRectGetWidth(bBoxBounds) - 20, CGRectGetHeight(bBoxBounds) - 55)];
+    [hpoInnerSplit setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [hpoInnerSplit setVertical:YES];
+    [[browserBox contentView] addSubview:hpoInnerSplit];
 
-    var splitBounds = [splitView bounds];
-    var splitWidth = CGRectGetWidth(splitBounds);
-    var splitHeight = CGRectGetHeight(splitBounds);
-    var dividerWidth = [splitView dividerThickness];
+    var innerWidth = CGRectGetWidth([hpoInnerSplit bounds]);
+    var innerHeight = CGRectGetHeight([hpoInnerSplit bounds]);
+    var innerDividerWidth = [hpoInnerSplit dividerThickness];
 
-    var leftWidth = (splitWidth - dividerWidth) * 0.60;
-    var rightWidth = (splitWidth - dividerWidth) - leftWidth;
+    var treeWidth = (innerWidth - innerDividerWidth) * 0.45;
+    var detailsWidth = (innerWidth - innerDividerWidth) - treeWidth;
 
-    var leftScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(0, 0, leftWidth, splitHeight)];
-    [leftScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-    [leftScroll setAutohidesScrollers:NO];
+    // Initialize the Tree Controller (Missing in your integrated version)
+    treeController = [[CPTreeController alloc] init];
+    [treeController setChildrenKeyPath:@"children"];
+    [treeController setLeafKeyPath:@"isLeaf"];
 
-    outlineView = [[CPOutlineView alloc] initWithFrame:[leftScroll bounds]];
+    // HPO Left: Main Outline Tree View
+    var treeScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(0, 0, treeWidth, innerHeight)];
+    [treeScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [treeScroll setAutohidesScrollers:NO];
+
+    outlineView = [[HPOOutlineView alloc] initWithFrame:[treeScroll bounds]]; 
     var column = [[CPTableColumn alloc] initWithIdentifier:@"name"];
     [[column headerView] setStringValue:@"HPO Tree Nodes"];
-
     [column setResizingMask:CPTableColumnAutoresizingMask];
     [outlineView setColumnAutoresizingStyle:CPTableViewLastColumnOnlyAutoresizingStyle];
     [outlineView addTableColumn:column];
     [outlineView setOutlineTableColumn:column];
     [outlineView setAllowsMultipleSelection:NO];
     [outlineView setDelegate:self];
-    [leftScroll setDocumentView:outlineView];
-    [splitView addSubview:leftScroll];
+        [treeScroll setDocumentView:outlineView];
+    [hpoInnerSplit addSubview:treeScroll];
 
-    var rightSplitView = [[CPSplitView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, splitHeight)];
-    [rightSplitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-    [rightSplitView setVertical:NO];
+    // HPO Right: Analytical Details Tab View (Conserves workspace space dynamically)
+    var detailsContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, detailsWidth, innerHeight)];
+    [detailsContainer setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
-    var defScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, splitHeight * 0.25)];
+    var hpoDetailsTab = [[CPTabView alloc] initWithFrame:[detailsContainer bounds]];
+    [hpoDetailsTab setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [detailsContainer addSubview:hpoDetailsTab];
+
+    // Tab 1: Term Definition & Associated Synonyms
+    var defTabItem = [[CPTabViewItem alloc] initWithIdentifier:@"defItem"];
+    [defTabItem setLabel:@"Definition & Synonyms"];
+    var defTabInner = [[CPView alloc] initWithFrame:[hpoDetailsTab bounds]];
+    [defTabItem setView:defTabInner];
+    [hpoDetailsTab addTabViewItem:defTabItem];
+
+    var tabHeight = CGRectGetHeight([hpoDetailsTab bounds]);
+    var defScrollHeight = tabHeight * 0.35;
+    var synScrollHeight = tabHeight - defScrollHeight - 35;
+
+    var defScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(5, 5, detailsWidth - 10, defScrollHeight)];
     [defScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [defScroll setAutohidesScrollers:YES];
     [defScroll setHasHorizontalScroller:NO];
@@ -873,35 +1033,10 @@
     [definitionTextView setAutoresizingMask:CPViewWidthSizable];
     [definitionTextView setEditable:NO];
     [definitionTextView setSelectable:YES];
-
     [defScroll setDocumentView:definitionTextView];
+    [defTabInner addSubview:defScroll];
 
-    var defBox = [[CPBox alloc] initWithFrame:CGRectMake(0,0, rightWidth, splitHeight * 0.25)];
-    [defBox setTitle:@"Term Definition"];
-    [defBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-    [[defBox contentView] addSubview:defScroll];
-    [rightSplitView addSubview:defBox];
-
-    var xrefScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, splitHeight * 0.20)];
-    [xrefScroll setAutohidesScrollers:YES];
-
-    xrefsTableView = [[CPTableView alloc] initWithFrame:[xrefScroll bounds]];
-    var xrefCol = [[CPTableColumn alloc] initWithIdentifier:@"xref"];
-    [xrefCol setSortDescriptorPrototype:[CPSortDescriptor sortDescriptorWithKey:@"xref" ascending:YES]];
-    [[xrefCol headerView] setStringValue:@"Database Mapping references"];
-    [xrefCol setWidth:rightWidth - 5];
-    [xrefsTableView addTableColumn:xrefCol];
-    [xrefsTableView setDataSource:self];
-    [xrefScroll setDocumentView:xrefsTableView];
-    [xrefScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-
-    var xrefBox = [[CPBox alloc] initWithFrame:CGRectMake(0,0, rightWidth, splitHeight * 0.20)];
-    [xrefBox setTitle:@"Cross References (Xrefs)"];
-    [xrefBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
-    [[xrefBox contentView] addSubview:xrefScroll];
-    [rightSplitView addSubview:xrefBox];
-
-    var synScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, splitHeight * 0.25)];
+    var synScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(5, defScrollHeight + 10, detailsWidth - 10, synScrollHeight)];
     [synScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [synScroll setAutohidesScrollers:YES];
 
@@ -909,25 +1044,48 @@
     var synCol = [[CPTableColumn alloc] initWithIdentifier:@"label"];
     [[synCol headerView] setStringValue:@"Associated Synonyms"];
     [synCol setSortDescriptorPrototype:[CPSortDescriptor sortDescriptorWithKey:@"label" ascending:YES]];
-    [synCol setWidth:rightWidth - 5];
+    [synCol setWidth:detailsWidth - 30];
     [synonymsTableView addTableColumn:synCol];
     [synonymsTableView setDataSource:self];
     [synScroll setDocumentView:synonymsTableView];
-    [rightSplitView addSubview:synScroll];
+    [defTabInner addSubview:synScroll];
 
-    var textBox = [[CPBox alloc] initWithFrame:CGRectMake(0,0, rightWidth, splitHeight * 0.30)];
-    [textBox setTitle:@"Downstream Child Classes"];
-    [textBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    // Tab 2: Database Mapping Cross References (Xrefs)
+    var xrefTabItem = [[CPTabViewItem alloc] initWithIdentifier:@"xrefItem"];
+    [xrefTabItem setLabel:@"Cross References"];
+    var xrefTabInner = [[CPView alloc] initWithFrame:[hpoDetailsTab bounds]];
+    [xrefTabItem setView:xrefTabInner];
+    [hpoDetailsTab addTabViewItem:xrefTabItem];
 
-    var contentBounds = [[textBox contentView] bounds];
+    var xrefScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(5, 5, detailsWidth - 10, tabHeight - 40)];
+    [xrefScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [xrefScroll setAutohidesScrollers:YES];
 
-    var downScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(0, 0, CGRectGetWidth(contentBounds), CGRectGetHeight(contentBounds) - 34)];
+    xrefsTableView = [[CPTableView alloc] initWithFrame:[xrefScroll bounds]];
+    var xrefCol = [[CPTableColumn alloc] initWithIdentifier:@"xref"];
+    [xrefCol setSortDescriptorPrototype:[CPSortDescriptor sortDescriptorWithKey:@"xref" ascending:YES]];
+    [[xrefCol headerView] setStringValue:@"Database Mapping references"];
+    [xrefCol setWidth:detailsWidth - 30];
+    [xrefsTableView addTableColumn:xrefCol];
+    [xrefsTableView setDataSource:self];
+    [xrefScroll setDocumentView:xrefsTableView];
+    [xrefTabInner addSubview:xrefScroll];
+
+    // Tab 3: Downstream Child Classes
+    var downTabItem = [[CPTabViewItem alloc] initWithIdentifier:@"downItem"];
+    [downTabItem setLabel:@"Downstream Classes"];
+    var downTabInner = [[CPView alloc] initWithFrame:[hpoDetailsTab bounds]];
+    [downTabItem setView:downTabInner];
+    [hpoDetailsTab addTabViewItem:downTabItem];
+
+    var downScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(5, 5, detailsWidth - 10, tabHeight - 75)];
     [downScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [downScroll setAutohidesScrollers:YES];
 
     downstreamTableView = [[CPTableView alloc] initWithFrame:[downScroll bounds]];
     [downstreamTableView setTarget:self];
     [downstreamTableView setDoubleAction:@selector(doubleClickDownstream:)];
+    [downstreamTableView setDataSource:self]; // Drag source permitted for downstream children
 
     var downIdCol = [[CPTableColumn alloc] initWithIdentifier:@"id"];
     [[downIdCol headerView] setStringValue:@"Class ID"];
@@ -938,25 +1096,37 @@
     var downLabelCol = [[CPTableColumn alloc] initWithIdentifier:@"label"];
     [[downLabelCol headerView] setStringValue:@"Ontology Standard Label"];
     [downLabelCol setSortDescriptorPrototype:[CPSortDescriptor sortDescriptorWithKey:@"label" ascending:YES]];
-    [downLabelCol setWidth:rightWidth - 98];
+    [downLabelCol setWidth:detailsWidth - 130];
     [downstreamTableView addTableColumn:downLabelCol];
-    [downstreamTableView setDataSource:self];
     [downScroll setDocumentView:downstreamTableView];
-    [[textBox contentView] addSubview:downScroll];
+    [downTabInner addSubview:downScroll];
 
-    var exportBtn = [[CPButton alloc] initWithFrame:CGRectMake(3, CGRectGetMaxY([downScroll bounds]) + 3, 120, 24)];
+    var exportBtn = [[CPButton alloc] initWithFrame:CGRectMake(5, tabHeight - 65, 140, 24)];
     [exportBtn setAutoresizingMask:CPViewMinYMargin | CPViewMaxXMargin];
     [exportBtn setTitle:@"Export Tree IDs"];
     [exportBtn setTarget:self];
     [exportBtn setAction:@selector(exportDownstream:)];
-    [[textBox contentView] addSubview:exportBtn];
-    [rightSplitView addSubview:textBox];
+    [downTabInner addSubview:exportBtn];
 
-    [splitView addSubview:rightSplitView];
-    [tab2View addSubview:splitView];
+    [hpoInnerSplit addSubview:detailsContainer];
+
+    [rightSplitView addSubview:topPane];
+    [rightSplitView addSubview:bottomPane];
+
+    [rightContainer addSubview:rightSplitView];
+
+    [mainSplitView addSubview:leftContainer];
+    [mainSplitView addSubview:rightContainer];
+
+    [self resetEditor:self];
 
     [outlineView bind:@"content" toObject:treeController withKeyPath:@"arrangedObjects" options:nil];
     [outlineView bind:@"selectionIndexPaths" toObject:treeController withKeyPath:@"selectionIndexPaths" options:nil];
+
+    [[CPNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(ruleEditorDidChange:)
+                                                 name:CPRuleEditorRowsDidChangeNotification
+                                               object:_ruleEditor];
 }
 
 - (id)convertCustomJSONToFHIRGroup:(id)customNode
@@ -1043,7 +1213,7 @@
 }
 
 // --------------------------------------------------------------------------------
-// Tab 1: FHIR Criterion Flattened Insertion & Model Helpers
+// Unified Workspace Insertion Methods
 // --------------------------------------------------------------------------------
 
 - (void)flattenNode:(FHIRCriteriaNode)node depth:(int)depth intoArray:(CPMutableArray)array
@@ -1130,7 +1300,7 @@
         control = [sender object];
     }
 
-    if ([control isKindOfClass:[CPTokenField class]] && control.node)
+    if ([control isKindOfClass:[HPOTokenField class]] && control.node)
     {
         var tokens = [control objectValue] || [];
         [control.node setHpoTokens:tokens];
@@ -1372,8 +1542,72 @@
         for (var i = 0; i < characteristics.length; i++)
         {
             var charItem = characteristics[i];
+            var isCompositeSubgroup = NO;
             var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
-            if (isSubgroup)
+            
+            if (isSubgroup && charItem.id && [charItem.id indexOf:@"composite-"] === 0)
+            {
+                isCompositeSubgroup = YES;
+            }
+
+            if (isCompositeSubgroup)
+            {
+                var subNode = [[FHIRCriteriaNode alloc] init];
+                [subNode setRowType:CPRuleEditorRowTypeSimple];
+                
+                var isExclude = (charItem.exclude === true);
+                var presenceMode = @"all-present";
+                if (isExclude || charItem.combinationMethod === "neither-of")
+                {
+                    presenceMode = @"neither-present";
+                }
+                else if (charItem.combinationMethod === "any-of")
+                {
+                    presenceMode = @"any-present";
+                }
+                [subNode setPresenceMode:presenceMode];
+                
+                var tokens = [];
+                var subChars = charItem.characteristic || [];
+                for (var m = 0; m < subChars.length; m++)
+                {
+                    var nestedChar = subChars[m];
+                    var valueCodeableConcept = nestedChar.valueCodeableConcept;
+                    if (valueCodeableConcept && valueCodeableConcept.coding)
+                    {
+                        var codings = valueCodeableConcept.coding;
+                        for (var j = 0; j < codings.length; j++)
+                        {
+                            var coding = codings[j];
+                            var codeVal = coding.code || "";
+                            if (codeVal && codeVal.indexOf("[HPO_CODE_FOR_") !== 0)
+                            {
+                                tokens.push({
+                                    "code": codeVal,
+                                    "display": coding.display || codeVal
+                                });
+                            }
+                            else
+                            {
+                                tokens.push({
+                                    "code": @"HP:0000118",
+                                    "display": coding.display || @"Symptom"
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                [subNode setHpoTokens:tokens];
+                if (tokens.length > 0)
+                {
+                    [subNode setSymptomText:tokens[0].display];
+                }
+                
+                [subNode updateCriteriaAndDisplayValues];
+                [subrows addObject:subNode];
+            }
+            else if (isSubgroup)
             {
                 var subNode = [self nodeFromFHIRGroup:charItem];
                 if (subNode)
@@ -1635,9 +1869,16 @@
                 [subGroup setObject:compositeID forKey:@"id"];
                 [subGroup setObject:@"conceptual" forKey:@"membership"];
                 [subGroup setObject:@"person" forKey:@"type"];
-                [subGroup setObject:@"all-of" forKey:@"combinationMethod"];
+                
+                var subCombMethod = @"all-of";
+                if ([[childNode presenceMode] isEqualToString:@"any-present"]) {
+                    subCombMethod = @"any-of";
+                }
+                [subGroup setObject:subCombMethod forKey:@"combinationMethod"];
                 
                 var subCharacteristics = [CPMutableArray array];
+                var isExclude = [[childNode presenceMode] isEqualToString:@"neither-present"];
+
                 for (var k = 0; k < tokens.length; k++)
                 {
                     var tok = tokens[k];
@@ -1659,8 +1900,10 @@
                     }];
                     
                     [subCharItem setObject:{"coding": codings} forKey:@"valueCodeableConcept"];
-                    [subCharItem setObject:NO forKey:@"exclude"];
-                    [subCharItem setObject:@"all-of" forKey:@"combinationMethod"];
+                    [subCharItem setObject:isExclude forKey:@"exclude"];
+                    
+                    var itemComb = isExclude ? @"neither-of" : @"all-of";
+                    [subCharItem setObject:itemComb forKey:@"combinationMethod"];
                     
                     [subCharacteristics addObject:subCharItem];
                 }
@@ -1670,8 +1913,6 @@
                 var refCharacteristic = [CPMutableDictionary dictionary];
                 [refCharacteristic setObject:{"text": "Composite Logical subgroup"} forKey:@"code"];
                 [refCharacteristic setObject:{"reference": "#" + compositeID} forKey:@"valueReference"];
-                
-                var isExclude = [[childNode presenceMode] isEqualToString:@"neither-present"];
                 [refCharacteristic setObject:isExclude forKey:@"exclude"];
                 
                 [characteristics addObject:refCharacteristic];
