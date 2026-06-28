@@ -77,6 +77,9 @@
         _exclude = NO;
         _combinationMethod = @"all-of";
         _indentation = 0;
+
+        // Force initial population of standard inclusion metadata
+        [self updateCriteriaAndDisplayValues];
     }
     return self;
 }
@@ -478,7 +481,7 @@
     _synopsisInputTextView = [[CPTextView alloc] initWithFrame:[synScroll bounds]];
     [_synopsisInputTextView setAutoresizingMask:CPViewWidthSizable];
     [_synopsisInputTextView setFont:[CPFont fontWithName:@"Helvetica" size:12.0]];
-    
+
     var demoSynopsis = "Clinical Study Protocol Synopsis: Dry Eye Syndrome Efficacy Trial (Phase II)\n\n" +
                        "Objective:\n" +
                        "To evaluate the efficacy and safety of Ophthalmic Solution DBB-026 in patients with moderate to severe Keratoconjunctivitis Sicca (Dry Eye Disease).\n\n" +
@@ -492,9 +495,9 @@
                        "- Must NOT have any active ocular infection (such as bacterial conjunctivitis, keratitis, or blepharitis).\n" +
                        "- No history of refractive corneal surgery (e.g., LASIK, PRK) within the past 180 days.\n" +
                        "- Patients with secondary Sjögren's syndrome or active ocular allergy are excluded.";
-    
+
     [_synopsisInputTextView setString:demoSynopsis];
-    
+
     [synScroll setDocumentView:_synopsisInputTextView];
     [[synopsisBox contentView] addSubview:synScroll];
     [leftContainer addSubview:synopsisBox];
@@ -792,14 +795,14 @@
     var group = {};
     group.resourceType = "Group";
     group.combinationMethod = customNode.combinationMethod || "all-of";
-    
+
     var customCharacteristics = customNode.characteristics || customNode.characteristic || [];
     var fhirCharacteristics = [];
 
     for (var i = 0; i < customCharacteristics.length; i++)
     {
         var item = customCharacteristics[i];
-        
+
         if (item.subgroup)
         {
             var subGroup = [self convertCustomJSONToFHIRGroup:item.subgroup];
@@ -935,11 +938,6 @@
 
 - (void)resetEditor:(id)sender
 {
-    var newNode = [[FHIRCriteriaNode alloc] init];
-    [newNode setRowType:CPRuleEditorRowTypeSimple];
-    [newNode updateCriteriaAndDisplayValues];
-
-    [self setRootNodes:[CPMutableArray arrayWithObject:newNode]];
     [self updateFHIRGroupRepresentation];
 }
 
@@ -1004,12 +1002,12 @@
             try {
                 var parsedData = JSON.parse(data);
                 console.log("DEBUG [Backend Response] raw phenopacket: ", parsedData);
-                
+
                 // Normalise hierarchy payload formats if custom fields exist
                 if (parsedData && (parsedData.characteristics || parsedData.combinationMethod)) {
                     parsedData = [self convertCustomJSONToFHIRGroup:parsedData];
                 }
-                
+
                 if (parsedData && parsedData.resourceType === "Group") {
                     [self importFHIRGroup:parsedData];
                 } else {
@@ -1278,6 +1276,17 @@
                 rawText = valCodeableConcept.coding[0].display || @"";
             }
             [childNode setSymptomText:rawText];
+            
+            // Strategic frontend debugging output (corrected to Objective-J bracket syntax)
+            console.log("DEBUG [Frontend Parser] Index " + i + 
+                        ": text='" + rawText + 
+                        "' | exclude=" + [childNode exclude] + 
+                        " (raw JSON source exclude=" + charItem.exclude + ")");
+
+            // Explicitly force synchronization of criteria and display values 
+            // after populating imported properties
+            [childNode updateCriteriaAndDisplayValues];
+            
             [[node subrows] addObject:childNode];
         }
     }
@@ -1331,6 +1340,9 @@
     try
     {
         _isImportingJSON = YES;
+
+        // Strategic debug log of the backend response prior to rendering
+        console.log("DEBUG [Frontend Import] Incoming rootGroup payload: ", rootGroup);
 
         var flattenedGroup = [self _flattenFHIRGroup:rootGroup];
         var rootNode = [self nodeFromFHIRGroup:flattenedGroup];

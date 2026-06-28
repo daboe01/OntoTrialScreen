@@ -222,7 +222,6 @@ sub normalize_to_hierarchical_schema {
     my ($raw) = @_;
     return unless ref $raw eq 'HASH';
 
-    # If already aligned with the target schema, return as is
     if (exists $raw->{characteristics} && ref $raw->{characteristics} eq 'ARRAY') {
         return $raw;
     }
@@ -232,10 +231,14 @@ sub normalize_to_hierarchical_schema {
         characteristics => []
     };
 
-    # Match common local model variations (e.g., Gemma's phenotypic_features)
     if (exists $raw->{phenotypic_features} && ref $raw->{phenotypic_features} eq 'ARRAY') {
         foreach my $group_item (@{$raw->{phenotypic_features}}) {
-            my $group_exclude = ($group_item->{exclude} || ($group_item->{name} && $group_item->{name} =~ /exclusion/i)) ? 1 : 0;
+            my $raw_exclude = $group_item->{exclude};
+
+            # Safe dereference of boolean fields
+            my $is_exclude_true = (ref $raw_exclude ? $$raw_exclude : $raw_exclude) ? 1 : 0;
+            my $group_exclude = ($is_exclude_true || ($group_item->{name} && $group_item->{name} =~ /exclusion/i)) ? 1 : 0;
+
             my $group_logic = $group_item->{logic} // $group_item->{combinationMethod} // 'all-of';
             $group_logic = ($group_logic =~ /any/i) ? 'any-of' : 'all-of';
 
@@ -244,7 +247,6 @@ sub normalize_to_hierarchical_schema {
                 characteristics => []
             };
 
-            # Handle nested subgroups
             if (exists $group_item->{subgroups} && ref $group_item->{subgroups} eq 'ARRAY') {
                 foreach my $sub (@{$group_item->{subgroups}}) {
                     my $sub_logic = $sub->{logic} // $sub->{combinationMethod} // 'all-of';
@@ -269,7 +271,6 @@ sub normalize_to_hierarchical_schema {
                 }
             }
 
-            # Handle flat features inside the parent group item
             if (exists $group_item->{features} && ref $group_item->{features} eq 'ARRAY') {
                 foreach my $feat (@{$group_item->{features}}) {
                     push @{$subgroup->{characteristics}}, {
@@ -325,7 +326,7 @@ helper map_to_hpo_async => sub {
 };
 
 # =========================================================
-# RECURSIVE ASYNCHRONOUS HPO MAPPER HELPER
+# RECURSIVE ASYNCHRONOUS HPO MAPPER HELPER (Order Preserving)
 # =========================================================
 helper map_hierarchical_group_async => sub {
     my ($self, $group) = @_;
@@ -335,16 +336,33 @@ helper map_hierarchical_group_async => sub {
     my $characteristics    = $group->{characteristics}    // [];
 
     my @promises;
-    my $mapped_characteristics = [];
+    my @mapped_characteristics; # Pre-allocate array to preserve original indices
 
-    foreach my $char (@$characteristics) {
+    for (my $i = 0; $i < @$characteristics; $i++) {
+        my $char = $characteristics->[$i];
+
         if (my $sym = $char->{symptom}) {
             my $label   = $sym->{label};
-            my $exclude = $sym->{exclude} ? 1 : 0;
+            my $raw_exclude = $sym->{exclude};
+
+            # Safe dereference of Mojo::JSON boolean references (\1 or \0)
+            my $exclude = (ref $raw_exclude ? $$raw_exclude : $raw_exclude) ? 1 : 0;
+
+            # Strategic debug statement
+            $self->app->log->debug(sprintf(
+            "[DEBUG HPO Backend] Mapping element %d: '%s' | raw_exclude=%s | resolved_exclude=%d",
+            $i + 1,
+            $label,
+            (defined $raw_exclude ? (ref $raw_exclude ? "ref(" . $$raw_exclude . ")" : $raw_exclude) : 'undef'),
+            $exclude
+            ));
+
+            # Capture the current index in a lexical scope
+            my $index = $i;
 
             my $p = $self->map_to_hpo_async($label, 0)->then(sub {
                 my $mapped_hpo = shift;
-                push @$mapped_characteristics, {
+                $mapped_characteristics[$index] = {
                     exclude => $exclude ? \1 : \0,
                     valueCodeableConcept => {
                         coding => [{
@@ -358,9 +376,11 @@ helper map_hierarchical_group_async => sub {
             push @promises, $p;
         }
         elsif (my $sub = $char->{subgroup}) {
+            my $index = $i;
+
             my $p = $self->map_hierarchical_group_async($sub)->then(sub {
                 my $mapped_subgroup = shift;
-                push @$mapped_characteristics, $mapped_subgroup if $mapped_subgroup;
+                $mapped_characteristics[$index] = $mapped_subgroup if $mapped_subgroup;
             });
             push @promises, $p;
         }
@@ -368,17 +388,18 @@ helper map_hierarchical_group_async => sub {
 
     if (@promises) {
         return Mojo::Promise->all(@promises)->then(sub {
+            my @clean = grep { defined } @mapped_characteristics;
             return {
                 resourceType      => "Group",
                 combinationMethod => $combination_method,
-                characteristic    => $mapped_characteristics
+                characteristic    => \@clean
             };
         });
     } else {
         return Mojo::Promise->resolve({
             resourceType      => "Group",
             combinationMethod => $combination_method,
-            characteristic    => $mapped_characteristics
+            characteristic    => []
         });
     }
 };
