@@ -452,7 +452,8 @@ helper extract_structured_data_async => sub {
             if ($tx_call->result && $tx_call->result->is_success) {
                 my $content = $tx_call->result->json('/choices/0/message/content') // $tx_call->result->body // '';
 
-                $self->app->log->debug("[Backend] Raw response from LLM (first 500 characters):\n" . substr($content, 0, 500) . "...");
+                # $self->app->log->debug("[Backend] Raw response from LLM (first 500 characters):\n" . substr($content, 0, 500) . "...");
+                $self->app->log->debug($content);
 
                 my $parsed = clean_and_parse_json($content);
 
@@ -502,6 +503,131 @@ post '/DBB/extract_fhir_inex_criteria' => sub {
 
     $c->render_later;
 
+    # =========================================================
+    # DEBUG-MOCK INTERVENTION
+    # =========================================================
+    if (defined $selected_model && $selected_model eq 'mock-extractor') {
+        $c->app->log->debug("[Backend] Model 'mock-extractor' detected. Bypassing LLM execution and returning mock structured JSON...");
+
+        my $mock_data = {
+            combinationMethod => "all-of",
+            characteristics => [
+            {
+                subgroup => {
+                    combinationMethod => "all-of",
+                    characteristics => [
+                    {
+                        subgroup => {
+                            combinationMethod => "all-of",
+                            characteristics => [
+                            {
+                                symptom => {
+                                    label => "Keratoconjunctivitis Sicca (Dry Eye Disease)",
+                                    exclude => \0 # Mojo JSON boolean false
+                                }
+                            },
+                            {
+                                symptom => {
+                                    label => "Corneal epithelial erosion or punctate keratitis",
+                                    exclude => \0
+                                }
+                            }
+                            ]
+                        }
+                    },
+                    {
+                        subgroup => {
+                            combinationMethod => "any-of",
+                            characteristics => [
+                            {
+                                symptom => {
+                                    label => "Severe ocular discomfort",
+                                    exclude => \0
+                                }
+                            },
+                            {
+                                symptom => {
+                                    label => "Foreign body sensation",
+                                    exclude => \0
+                                }
+                            },
+                            {
+                                symptom => {
+                                    label => "Persistent ocular burning",
+                                    exclude => \0
+                                }
+                            }
+                            ]
+                        }
+                    },
+                    {
+                        subgroup => {
+                            combinationMethod => "all-of",
+                            characteristics => [
+                            {
+                                symptom => {
+                                    label => "Decreased tear production (Schirmer's I \\le 10 mm/5 minutes)",
+                                    exclude => \0
+                                }
+                            }
+                            ]
+                        }
+                    }
+                    ]
+                }
+            },
+            {
+                subgroup => {
+                    combinationMethod => "any-of",
+                    characteristics => [
+                    {
+                        symptom => {
+                            label => "Active ocular infection (bacterial conjunctivitis, keratitis, or blepharitis)",
+                            exclude => \1 # Mojo JSON boolean true
+                        }
+                    },
+                    {
+                        symptom => {
+                            label => "History of refractive corneal surgery within the past 180 days",
+                            exclude => \1
+                        }
+                    },
+                    {
+                        symptom => {
+                            label => "Secondary Sjögren's syndrome",
+                            exclude => \1
+                        }
+                    },
+                    {
+                        symptom => {
+                            label => "Active ocular allergy",
+                            exclude => \1
+                        }
+                    }
+                    ]
+                }
+            }
+            ]
+        };
+
+        # Übergebe die Mock-Daten an die HPO-Asynchron-Mapping Pipeline
+        return $c->map_hierarchical_group_async($mock_data)->then(sub {
+            my $mapped_group = shift;
+            if ($c->tx && !$c->tx->is_finished) {
+                $c->render(json => $mapped_group);
+            }
+        })->catch(sub {
+            my $err = shift;
+            $c->app->log->error("Error mapping mock group: $err");
+            if ($c->tx && !$c->tx->is_finished) {
+                $c->render(json => { error => "Mock pipeline failure", details => "$err" }, status => 500);
+            }
+        });
+    }
+
+    # =========================================================
+    # REALE LLM EXTRAKTION (PRODUKTIV-PFAD)
+    # =========================================================
     my $sys_instruction = "You are an expert medical entity extraction assistant. "
     . "Your job is to analyze the patient clinical synopsis and extract patient phenotypic features into a logical nested group structure. "
     . "Group the clinical symptoms into logical blocks using 'all-of' (AND) and 'any-of' (OR) relationships. "

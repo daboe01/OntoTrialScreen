@@ -46,6 +46,137 @@
 
 
 // --------------------------------------------------------------------------------
+// FHIRCriteriaNode (Structured MVC Row Model)
+// --------------------------------------------------------------------------------
+
+@implementation FHIRCriteriaNode : CPObject
+{
+    CPRuleEditorRowType _rowType           @accessors(property=rowType);
+    CPMutableArray      _subrows           @accessors(property=subrows);
+    CPArray             _criteria          @accessors(property=criteria);
+    CPArray             _displayValues     @accessors(property=displayValues);
+
+    CPString            _symptomText;
+    BOOL                _exclude;
+    CPString            _combinationMethod;
+    int                 _indentation       @accessors(property=indentation);
+
+    CPTextField         _textField         @accessors(property=textField);
+}
+
+- (id)init
+{
+    self = [super init];
+    if (self)
+    {
+        _subrows = [CPMutableArray array];
+        _criteria = [CPArray array];
+        _displayValues = [CPArray array];
+        _rowType = CPRuleEditorRowTypeSimple;
+        _symptomText = @"";
+        _exclude = NO;
+        _combinationMethod = @"all-of";
+        _indentation = 0;
+    }
+    return self;
+}
+
+- (CPArray)subrows_none
+{
+    return [];
+}
+
+- (void)setSymptomText:(CPString)text
+{
+    if (_symptomText !== text)
+    {
+        _symptomText = text;
+        [self updateCriteriaAndDisplayValues];
+    }
+}
+
+- (CPString)symptomText
+{
+    return _symptomText;
+}
+
+- (void)setExclude:(BOOL)exclude
+{
+    if (_exclude !== exclude)
+    {
+        _exclude = exclude;
+        [self updateCriteriaAndDisplayValues];
+    }
+}
+
+- (BOOL)exclude
+{
+    return _exclude;
+}
+
+- (void)setCombinationMethod:(CPString)method
+{
+    if (_combinationMethod !== method)
+    {
+        _combinationMethod = method;
+        [self updateCriteriaAndDisplayValues];
+    }
+}
+
+- (CPString)combinationMethod
+{
+    return _combinationMethod;
+}
+
+- (void)setCriteria:(CPArray)criteria
+{
+    if (_criteria !== criteria)
+    {
+        _criteria = criteria;
+
+        if (_rowType === CPRuleEditorRowTypeCompound)
+        {
+            if ([_criteria count] > 0)
+            {
+                var first = [_criteria objectAtIndex:0];
+                _combinationMethod = (first === CPOrPredicateType) ? @"any-of" : @"all-of";
+            }
+        }
+        else
+        {
+            if ([_criteria count] > 1)
+            {
+                var second = [_criteria objectAtIndex:1];
+                _exclude = [second isEqualToString:@"exclusion"];
+            }
+        }
+    }
+}
+
+- (void)updateCriteriaAndDisplayValues
+{
+    if (_rowType === CPRuleEditorRowTypeCompound)
+    {
+        var predicateType = (_combinationMethod === @"any-of") ? CPOrPredicateType : CPAndPredicateType;
+        var dispAllAny = (_combinationMethod === @"any-of") ? @"Any" : @"All";
+
+        [self setCriteria:[CPArray arrayWithObjects:predicateType, @"_logical_text_", nil]];
+        [self setDisplayValues:[CPArray arrayWithObjects:dispAllAny, @"of the following are true", nil]];
+    }
+    else
+    {
+        var presence = _exclude ? @"exclusion" : @"inclusion";
+        var dispPresence = _exclude ? @"Must NOT be present (Exclusion)" : @"Must be present (Inclusion)";
+
+        [self setCriteria:[CPArray arrayWithObjects:@"phenotype", presence, @"_value_field_", nil]];
+        [self setDisplayValues:[CPArray arrayWithObjects:@"Symptom / Phenotype", dispPresence, @"_value_field_", nil]];
+    }
+}
+
+@end
+
+
+// --------------------------------------------------------------------------------
 // FHIRRuleEditor Subclass
 // --------------------------------------------------------------------------------
 
@@ -68,6 +199,35 @@
 {
     var forcedType = _insertCompoundMode ? CPRuleEditorRowTypeCompound : CPRuleEditorRowTypeSimple;
     [super _addOptionFromSlice:slice ofRowType:forcedType];
+}
+
+- (void)_updateSliceRows
+{
+    [super _updateSliceRows];
+
+    var count = [self numberOfRows];
+    for (var i = 0; i < count; i++)
+    {
+        var slice = [_slices objectAtIndex:i];
+        var depth = [self depthOfRowAtIndex:i];
+        [slice setIndentation:depth];
+    }
+}
+
+- (int)depthOfRowAtIndex:(int)rowIndex
+{
+    var node = [self nodeAtRowIndex:rowIndex];
+    return node ? [node indentation] : 0;
+}
+
+// Add this helper method so 'self' can resolve it during depth queries
+- (id)nodeAtRowIndex:(int)rowIndex
+{
+    if (rowIndex < 0 || rowIndex >= [self numberOfRows])
+        return nil;
+
+    var rowCache = [self _rowCacheForIndex:rowIndex];
+    return rowCache ? [rowCache rowObject] : nil;
 }
 
 @end
@@ -144,29 +304,34 @@
 
     if (criterion == @"_value_field_")
     {
-        if ([_controller respondsToSelector:@selector(importedTextFieldForRow:)])
+        var node = [_controller nodeAtRowIndex:row];
+        if (node)
         {
-            var cachedField = [_controller importedTextFieldForRow:row];
+            var cachedField = [node textField];
             if (cachedField)
             {
                 return cachedField;
             }
+
+            var inputField = [[CPTextField alloc] initWithFrame:CGRectMake(0, 0, 160, 24)];
+            [inputField setEditable:YES];
+            [inputField setBezeled:YES];
+            [inputField setBackgroundColor:[CPColor whiteColor]];
+            [inputField setPlaceholderString:@"e.g., Corneal erosion"];
+            [inputField setStringValue:[node symptomText]];
+            [inputField setTarget:_controller];
+            [inputField setAction:@selector(ruleEditorDidChange:)];
+
+            inputField.node = node;
+
+            [[CPNotificationCenter defaultCenter] addObserver:_controller
+                                                     selector:@selector(ruleEditorDidChange:)
+                                                         name:CPControlTextDidChangeNotification
+                                                       object:inputField];
+
+            [node setTextField:inputField];
+            return inputField;
         }
-
-        var inputField = [[CPTextField alloc] initWithFrame:CGRectMake(0, 0, 160, 24)];
-        [inputField setEditable:YES];
-        [inputField setBezeled:YES];
-        [inputField setBackgroundColor:[CPColor whiteColor]];
-        [inputField setPlaceholderString:@"e.g., Corneal erosion"];
-        [inputField setTarget:_controller];
-        [inputField setAction:@selector(ruleEditorDidChange:)];
-
-        [[CPNotificationCenter defaultCenter] addObserver:_controller
-                                                 selector:@selector(ruleEditorDidChange:)
-                                                     name:CPControlTextDidChangeNotification
-                                                   object:inputField];
-
-        return inputField;
     }
 
     return criterion;
@@ -226,16 +391,14 @@
     CPButton             _clearBtn;
     CPButton             _showJsonBtn;
 
-    CPTextView           _jsonTextView; // Off-screen syncing textview for helper operations
+    CPTextView           _jsonTextView;
     CPPopover            _jsonPopover;
     CPTextView           _popoverTextView;
 
-    CPArray              _currentTextFields;
-    int                  _currentTextFieldIndex;
+    CPMutableArray       _rootNodes          @accessors(property=rootNodes);
     BOOL                 _isImportingJSON;
-    CPMutableDictionary  _importedTextFieldsByRow;
 
-    // TAB 2: HPO Tree Browser (OntoMan2 Integration)
+    // TAB 2: HPO Tree Browser
     CPTreeController     treeController;
     CPOutlineView        outlineView;
     CPTextView           definitionTextView;
@@ -265,13 +428,11 @@
     var contentView = [theWindow contentView];
     var bounds = [contentView bounds];
 
-    // --- MAIN TAB VIEW ---
     _tabView = [[CPTabView alloc] initWithFrame:bounds];
     [_tabView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [contentView addSubview:_tabView];
 
     _isImportingJSON = NO;
-    _importedTextFieldsByRow = nil;
 
     _jsonTextView = [[CPTextView alloc] initWithFrame:CGRectMakeZero()];
     [_jsonTextView setDelegate:self];
@@ -303,7 +464,6 @@
     var leftWidth = CGRectGetWidth([tab1View bounds]) * 0.35;
     var rightWidth = CGRectGetWidth([tab1View bounds]) - leftWidth - [splitView dividerThickness];
 
-    // --- Left Control Panel (Synopsis Input & Extraction) ---
     var leftContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, leftWidth, CGRectGetHeight([tab1View bounds]))];
     [leftContainer setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
@@ -319,7 +479,6 @@
     [_synopsisInputTextView setAutoresizingMask:CPViewWidthSizable];
     [_synopsisInputTextView setFont:[CPFont fontWithName:@"Helvetica" size:12.0]];
     
-    // Dry Eye syndrome clinical trial protocol synopsis
     var demoSynopsis = "Clinical Study Protocol Synopsis: Dry Eye Syndrome Efficacy Trial (Phase II)\n\n" +
                        "Objective:\n" +
                        "To evaluate the efficacy and safety of Ophthalmic Solution DBB-026 in patients with moderate to severe Keratoconjunctivitis Sicca (Dry Eye Disease).\n\n" +
@@ -352,6 +511,7 @@
     [_modelPopUpButton setAutoresizingMask:CPViewWidthSizable];
     [_modelPopUpButton addItemWithTitle:@"gpt-oss-120b"];
     [_modelPopUpButton addItemWithTitle:@"gemma4:26b-mlx"];
+    [_modelPopUpButton addItemWithTitle:@"mock-extractor"];
     [[settingsBox contentView] addSubview:_modelPopUpButton];
 
     _extractButton = [[CPButton alloc] initWithFrame:CGRectMake(10, 48, CGRectGetWidth([settingsBox bounds]) - 20, 28)];
@@ -362,7 +522,6 @@
     [[settingsBox contentView] addSubview:_extractButton];
     [leftContainer addSubview:settingsBox];
 
-    // --- Right Structural Rule Panel ---
     var rightContainer = [[CPView alloc] initWithFrame:CGRectMake(0, 0, rightWidth, CGRectGetHeight([tab1View bounds]))];
     [rightContainer setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
@@ -385,6 +544,15 @@
     [_ruleEditor setDelegate:_ruleDelegate];
     [_ruleEditor setTarget:self];
     [_ruleEditor setAction:@selector(ruleEditorDidChange:)];
+
+    [_ruleEditor setRowClass:[FHIRCriteriaNode class]];
+    [_ruleEditor setRowTypeKeyPath:@"rowType"];
+    [_ruleEditor setSubrowsKeyPath:@"subrows_none"];
+    [_ruleEditor setCriteriaKeyPath:@"criteria"];
+    [_ruleEditor setDisplayValuesKeyPath:@"displayValues"];
+
+    [self setRootNodes:[CPMutableArray array]];
+    [_ruleEditor bind:@"rows" toObject:self withKeyPath:@"rootNodes" options:nil];
 
     [ruleScrollView setDocumentView:_ruleEditor];
     [[ruleBox contentView] addSubview:ruleScrollView];
@@ -617,47 +785,161 @@
     [outlineView bind:@"selectionIndexPaths" toObject:treeController withKeyPath:@"selectionIndexPaths" options:nil];
 }
 
+- (id)convertCustomJSONToFHIRGroup:(id)customNode
+{
+    if (!customNode) return nil;
+
+    var group = {};
+    group.resourceType = "Group";
+    group.combinationMethod = customNode.combinationMethod || "all-of";
+    
+    var customCharacteristics = customNode.characteristics || customNode.characteristic || [];
+    var fhirCharacteristics = [];
+
+    for (var i = 0; i < customCharacteristics.length; i++)
+    {
+        var item = customCharacteristics[i];
+        
+        if (item.subgroup)
+        {
+            var subGroup = [self convertCustomJSONToFHIRGroup:item.subgroup];
+            if (subGroup)
+            {
+                fhirCharacteristics.push(subGroup);
+            }
+        }
+        else if (item.symptom)
+        {
+            var sym = item.symptom;
+            var fhirChar = {
+                "exclude": sym.exclude ? true : false,
+                "valueCodeableConcept": {
+                    "coding": [{
+                        "system": "http://human-phenotype-ontology.org",
+                        "code": "",
+                        "display": sym.label || ""
+                    }]
+                }
+            };
+            fhirCharacteristics.push(fhirChar);
+        }
+        else if (item.characteristic || item.resourceType === "Group")
+        {
+            var subGroup = [self convertCustomJSONToFHIRGroup:item];
+            if (subGroup)
+            {
+                fhirCharacteristics.push(subGroup);
+            }
+        }
+        else
+        {
+            fhirCharacteristics.push(item);
+        }
+    }
+
+    group.characteristic = fhirCharacteristics;
+    return group;
+}
+
 // --------------------------------------------------------------------------------
-// Tab 1: FHIR Criterion Methods & Live Popover Integration
+// Hierarchy Helpers
 // --------------------------------------------------------------------------------
+
+- (FHIRCriteriaNode)nodeAtRowIndex:(int)rowIndex
+{
+    if (rowIndex < 0 || rowIndex >= [_ruleEditor numberOfRows])
+        return nil;
+
+    var rowCache = [_ruleEditor _rowCacheForIndex:rowIndex];
+    return rowCache ? [rowCache rowObject] : nil;
+}
+
+- (id)textFieldForRow:(int)row
+{
+    var node = [self nodeAtRowIndex:row];
+    return node ? [node textField] : nil;
+}
+
+// --------------------------------------------------------------------------------
+// Tab 1: FHIR Criterion Flattened Insertion & Model Helpers
+// --------------------------------------------------------------------------------
+
+- (void)flattenNode:(FHIRCriteriaNode)node depth:(int)depth intoArray:(CPMutableArray)array
+{
+    if (!node) return;
+
+    [node setIndentation:depth];
+    [array addObject:node];
+
+    var subrows = [node subrows] || [];
+    for (var i = 0; i < [subrows count]; i++)
+    {
+        [self flattenNode:subrows[i] depth:depth + 1 intoArray:array];
+    }
+}
+
+- (void)insertNode:(FHIRCriteriaNode)newNode
+{
+    var selectedRows = [_ruleEditor selectedRowIndexes];
+    var selectedIndex = [selectedRows count] > 0 ? [selectedRows lastIndex] : CPNotFound;
+
+    if (selectedIndex === CPNotFound)
+    {
+        [newNode setIndentation:0];
+        [[self mutableArrayValueForKey:@"rootNodes"] addObject:newNode];
+        return;
+    }
+
+    var selectedNode = [_rootNodes objectAtIndex:selectedIndex];
+    var targetDepth = [selectedNode indentation];
+
+    if ([selectedNode rowType] === CPRuleEditorRowTypeCompound)
+    {
+        targetDepth = targetDepth + 1;
+    }
+
+    [newNode setIndentation:targetDepth];
+    [[self mutableArrayValueForKey:@"rootNodes"] insertObject:newNode atIndex:selectedIndex + 1];
+}
 
 - (void)addSimpleRule:(id)sender
 {
-    var selectedRows = [_ruleEditor selectedRowIndexes];
-    var targetIndex = [selectedRows count] > 0 ? [selectedRows lastIndex] + 1 : [_ruleEditor numberOfRows];
+    var newNode = [[FHIRCriteriaNode alloc] init];
+    [newNode setRowType:CPRuleEditorRowTypeSimple];
+    [newNode updateCriteriaAndDisplayValues];
 
-    [_ruleEditor insertRowAtIndex:targetIndex
-                         withType:CPRuleEditorRowTypeSimple
-                    asSubrowOfRow:-1
-                          animate:YES];
+    [self insertNode:newNode];
 }
 
 - (void)addGroupRule:(id)sender
 {
-    var selectedRows = [_ruleEditor selectedRowIndexes];
-    var targetIndex = [selectedRows count] > 0 ? [selectedRows lastIndex] + 1 : [_ruleEditor numberOfRows];
+    var newNode = [[FHIRCriteriaNode alloc] init];
+    [newNode setRowType:CPRuleEditorRowTypeCompound];
+    [newNode setCombinationMethod:@"all-of"];
+    [newNode updateCriteriaAndDisplayValues];
 
-    [_ruleEditor insertRowAtIndex:targetIndex
-                         withType:CPRuleEditorRowTypeCompound
-                    asSubrowOfRow:-1
-                          animate:YES];
+    [self insertNode:newNode];
+
+    // Automatically append an initial simple row inside the new group
+    var childNode = [[FHIRCriteriaNode alloc] init];
+    [childNode setRowType:CPRuleEditorRowTypeSimple];
+    [childNode updateCriteriaAndDisplayValues];
+    [childNode setIndentation:[newNode indentation] + 1];
+
+    var groupIndex = [_rootNodes indexOfObjectIdenticalTo:newNode];
+    if (groupIndex !== CPNotFound)
+    {
+        [[self mutableArrayValueForKey:@"rootNodes"] insertObject:childNode atIndex:groupIndex + 1];
+    }
 }
 
 - (void)resetEditor:(id)sender
 {
-    var count = [_ruleEditor numberOfRows];
-    if (count > 0)
-    {
-        // Safe clear: loop in reverse order with includeSubrows:NO 
-        // to bypass the forward-scanning framework index bug
-        for (var i = count - 1; i >= 0; i--)
-        {
-            var indexes = [CPIndexSet indexSetWithIndex:i];
-            [_ruleEditor removeRowsAtIndexes:indexes includeSubrows:NO];
-        }
-    }
+    var newNode = [[FHIRCriteriaNode alloc] init];
+    [newNode setRowType:CPRuleEditorRowTypeSimple];
+    [newNode updateCriteriaAndDisplayValues];
 
-    [_ruleEditor addRow:self];
+    [self setRootNodes:[CPMutableArray arrayWithObject:newNode]];
     [self updateFHIRGroupRepresentation];
 }
 
@@ -666,50 +948,18 @@
     if (_isImportingJSON)
         return;
 
+    var control = sender;
+    if ([sender isKindOfClass:[CPNotification class]])
+    {
+        control = [sender object];
+    }
+
+    if ([control isKindOfClass:[CPTextField class]] && control.node)
+    {
+        [control.node setSymptomText:[control stringValue]];
+    }
+
     [self updateFHIRGroupRepresentation];
-}
-
-- (id)importedTextFieldForRow:(int)row
-{
-    if (_importedTextFieldsByRow)
-    {
-        return [_importedTextFieldsByRow objectForKey:[CPNumber numberWithInt:row]];
-    }
-    return nil;
-}
-
-- (CPArray)_allEditableTextFields
-{
-    var textFields = [CPMutableArray array];
-    [self _collectEditableTextFieldsFromView:_ruleEditor intoArray:textFields];
-
-    [textFields sortUsingFunction:function(tf1, tf2, context) {
-        var origin1 = [tf1 convertPoint:CGPointMakeZero() toView:nil];
-        var origin2 = [tf2 convertPoint:CGPointMakeZero() toView:nil];
-
-        if (origin1.y < origin2.y) return -1;
-        if (origin1.y > origin2.y) return 1;
-        if (origin1.x < origin2.x) return -1;
-        if (origin1.x > origin2.x) return 1;
-        return 0;
-    } context:nil];
-
-    return textFields;
-}
-
-- (void)_collectEditableTextFieldsFromView:(CPView)aView intoArray:(CPMutableArray)array
-{
-    if ([aView isKindOfClass:[CPTextField class]] && [aView isEditable])
-    {
-        [array addObject:aView];
-        return;
-    }
-
-    var subviews = [aView subviews];
-    for (var i = 0; i < [subviews count]; i++)
-    {
-        [self _collectEditableTextFieldsFromView:subviews[i] intoArray:array];
-    }
 }
 
 // --------------------------------------------------------------------------------
@@ -755,7 +1005,11 @@
                 var parsedData = JSON.parse(data);
                 console.log("DEBUG [Backend Response] raw phenopacket: ", parsedData);
                 
-                // Route directly to the visual importer if the response is already a FHIR Group
+                // Normalise hierarchy payload formats if custom fields exist
+                if (parsedData && (parsedData.characteristics || parsedData.combinationMethod)) {
+                    parsedData = [self convertCustomJSONToFHIRGroup:parsedData];
+                }
+                
                 if (parsedData && parsedData.resourceType === "Group") {
                     [self importFHIRGroup:parsedData];
                 } else {
@@ -847,48 +1101,7 @@
 
     try
     {
-        _currentTextFields = [self _allEditableTextFields];
-        _currentTextFieldIndex = 0;
-
-        var containedArray = [CPMutableArray array];
-        var subgroupCounter = { value: 0 };
-
-        var rootGroup;
-        var hasRootCompound = ([_ruleEditor numberOfRows] > 0 && [_ruleEditor rowTypeForRow:0] == CPRuleEditorRowTypeCompound);
-
-        if (hasRootCompound)
-        {
-            rootGroup = [self _compileGroupForRowIndex:0 containedArray:containedArray subgroupCounter:subgroupCounter];
-        }
-        else
-        {
-            rootGroup = [self _compileGroupForRowIndex:-1 containedArray:containedArray subgroupCounter:subgroupCounter];
-        }
-
-        [rootGroup setObject:@"Group" forKey:@"resourceType"];
-        [rootGroup setObject:@"eligibility-criteria" forKey:@"id"];
-        [rootGroup setObject:@"active" forKey:@"status"];
-        [rootGroup setObject:@"definitional" forKey:@"membership"];
-        [rootGroup setObject:@"person" forKey:@"type"];
-
-        var rootCombMethod = "all-of";
-        if (hasRootCompound)
-        {
-            var criteria = [_ruleEditor criteriaForRow:0];
-            if ([criteria count] > 0)
-            {
-                var methodVal = [criteria objectAtIndex:0];
-                if (methodVal === CPOrPredicateType)
-                    rootCombMethod = "any-of";
-            }
-        }
-        [rootGroup setObject:rootCombMethod forKey:@"combinationMethod"];
-
-        if ([containedArray count] > 0)
-        {
-            [rootGroup setObject:containedArray forKey:@"contained"];
-        }
-
+        var rootGroup = [self compileGroupFromFlatNodes:_rootNodes];
         var jsFormattedObject = [rootGroup JSObject];
         var prettyJson = JSON.stringify(jsFormattedObject, null, 2);
 
@@ -906,38 +1119,81 @@
     }
 }
 
-- (CPMutableDictionary)_compileGroupForRowIndex:(CPInteger)rowIndex containedArray:(CPMutableArray)containedArray subgroupCounter:(id)subgroupCounter
+- (CPMutableDictionary)compileGroupFromFlatNodes:(CPArray)flatNodes
+{
+    if ([flatNodes count] === 0) return [CPMutableDictionary dictionary];
+
+    // Reconstruct standard hierarchical structure from flat elements
+    var pseudoRoot = [[FHIRCriteriaNode alloc] init];
+    [pseudoRoot setRowType:CPRuleEditorRowTypeCompound];
+    [pseudoRoot setCombinationMethod:@"all-of"];
+
+    var stack = [pseudoRoot];
+
+    for (var i = 0; i < [flatNodes count]; i++)
+    {
+        var node = flatNodes[i];
+        [[node subrows] removeAllObjects];
+
+        var depth = [node indentation];
+
+        while (stack.length > depth + 1)
+        {
+            stack.pop();
+        }
+
+        var parent = stack[stack.length - 1];
+        [[parent subrows] addObject:node];
+        stack.push(node);
+    }
+
+    var containedArray = [CPMutableArray array];
+    var subgroupCounter = { value: 0 };
+    var rootGroup = [self compileGroupFromNode:pseudoRoot containedArray:containedArray subgroupCounter:subgroupCounter];
+
+    [rootGroup setObject:@"Group" forKey:@"resourceType"];
+    [rootGroup setObject:@"eligibility-criteria" forKey:@"id"];
+    [rootGroup setObject:@"active" forKey:@"status"];
+    [rootGroup setObject:@"definitional" forKey:@"membership"];
+    [rootGroup setObject:@"person" forKey:@"type"];
+
+    var rootCombMethod = "all-of";
+    if ([flatNodes count] === 1 && [[flatNodes objectAtIndex:0] rowType] == CPRuleEditorRowTypeCompound)
+    {
+        rootCombMethod = [[flatNodes objectAtIndex:0] combinationMethod] || "all-of";
+    }
+    [rootGroup setObject:rootCombMethod forKey:@"combinationMethod"];
+
+    if ([containedArray count] > 0)
+    {
+        [rootGroup setObject:containedArray forKey:@"contained"];
+    }
+
+    return rootGroup;
+}
+
+- (CPMutableDictionary)compileGroupFromNode:(FHIRCriteriaNode)node containedArray:(CPMutableArray)containedArray subgroupCounter:(id)subgroupCounter
 {
     var group = [CPMutableDictionary dictionary];
     [group setObject:@"Group" forKey:@"resourceType"];
 
-    var subrowIndexes = [_ruleEditor subrowIndexesForRow:rowIndex];
+    var subrows = [node subrows] || [];
     var characteristics = [CPMutableArray array];
 
-    var current_index = [subrowIndexes firstIndex];
-    while (current_index !== CPNotFound)
+    for (var i = 0; i < [subrows count]; i++)
     {
-        var rowType = [_ruleEditor rowTypeForRow:current_index];
+        var childNode = subrows[i];
 
-        if (rowType == CPRuleEditorRowTypeCompound)
+        if ([childNode rowType] === CPRuleEditorRowTypeCompound)
         {
             subgroupCounter.value = subgroupCounter.value + 1;
             var subgroupID = "subgroup-" + subgroupCounter.value;
 
-            var subGroup = [self _compileGroupForRowIndex:current_index containedArray:containedArray subgroupCounter:subgroupCounter];
+            var subGroup = [self compileGroupFromNode:childNode containedArray:containedArray subgroupCounter:subgroupCounter];
             [subGroup setObject:subgroupID forKey:@"id"];
             [subGroup setObject:@"conceptual" forKey:@"membership"];
             [subGroup setObject:@"person" forKey:@"type"];
-
-            var criteria = [_ruleEditor criteriaForRow:current_index];
-            var combMethod = "all-of";
-            if ([criteria count] > 0)
-            {
-                var methodVal = [criteria objectAtIndex:0];
-                if (methodVal === CPOrPredicateType)
-                    combMethod = "any-of";
-            }
-            [subGroup setObject:combMethod forKey:@"combinationMethod"];
+            [subGroup setObject:[childNode combinationMethod] forKey:@"combinationMethod"];
 
             [containedArray addObject:subGroup];
 
@@ -950,59 +1206,122 @@
         }
         else
         {
-            var criteria = [_ruleEditor criteriaForRow:current_index];
+            var rawText = [childNode symptomText] || @"";
+            var clinicalTerm = [rawText stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
+            var hpoTermName = [clinicalTerm isEqualToString:@""] ? @"UNDEFINED" : clinicalTerm;
 
-            if ([criteria count] >= 3)
-            {
-                var presence = [criteria objectAtIndex:1];
+            var formattedTerm = hpoTermName.toUpperCase().replace(/\s+/g, '_');
+            var hpoCodePlaceholder = "[HPO_CODE_FOR_" + formattedTerm + "]";
 
-                var rawText = @"";
-                if (_currentTextFieldIndex < [_currentTextFields count])
-                {
-                    var textField = [_currentTextFields objectAtIndex:_currentTextFieldIndex];
-                    rawText = [textField stringValue] || @"";
-                    _currentTextFieldIndex++;
-                }
+            var charItem = [CPMutableDictionary dictionary];
 
-                var clinicalTerm = [rawText stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
-                var hpoTermName = [clinicalTerm isEqualToString:@""] ? @"UNDEFINED" : clinicalTerm;
-
-                var formattedTerm = hpoTermName.toUpperCase().replace(/\s+/g, '_');
-                var hpoCodePlaceholder = "[HPO_CODE_FOR_" + formattedTerm + "]";
-
-                var charItem = [CPMutableDictionary dictionary];
-
-                [charItem setObject:@{
-                    @"coding": [
-                        @{
+            [charItem setObject:@{
+                @"coding": [
+                    @{
                         @"system": @"http://snomed.info/sct",
                         @"code": @"8116006",
                         @"display": @"Phänotypisches Merkmal"
                     }
-                        ]
-                } forKey:@"code"];
+                ]
+            } forKey:@"code"];
 
-                [charItem setObject:@{
-                    @"coding": [
-                        @{
+            [charItem setObject:@{
+                @"coding": [
+                    @{
                         @"system": @"http://human-phenotype-ontology.org",
                         @"code": hpoCodePlaceholder,
                         @"display": hpoTermName
                     }
-                        ]
-                } forKey:@"valueCodeableConcept"];
+                ]
+            } forKey:@"valueCodeableConcept"];
 
-                var isExclude = [presence isEqualToString:@"exclusion"];
-                [charItem setObject:isExclude forKey:@"exclude"];
+            [charItem setObject:[childNode exclude] forKey:@"exclude"];
 
-                [characteristics addObject:charItem];
-            }
+            [characteristics addObject:charItem];
         }
-
-        current_index = [subrowIndexes indexGreaterThanIndex:current_index];
     }
 
     [group setObject:characteristics forKey:@"characteristic"];
+    return group;
+}
+
+- (FHIRCriteriaNode)nodeFromFHIRGroup:(id)group
+{
+    if (!group) return nil;
+
+    var node = [[FHIRCriteriaNode alloc] init];
+    [node setRowType:CPRuleEditorRowTypeCompound];
+    [node setCombinationMethod:group.combinationMethod || @"all-of"];
+
+    var characteristics = group.characteristic || [];
+    for (var i = 0; i < characteristics.length; i++)
+    {
+        var charItem = characteristics[i];
+        if (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod)
+        {
+            var childNode = [self nodeFromFHIRGroup:charItem];
+            if (childNode)
+            {
+                [[node subrows] addObject:childNode];
+            }
+        }
+        else
+        {
+            var childNode = [[FHIRCriteriaNode alloc] init];
+            [childNode setRowType:CPRuleEditorRowTypeSimple];
+            [childNode setExclude:charItem.exclude ? YES : NO];
+
+            var rawText = @"";
+            var valCodeableConcept = charItem.valueCodeableConcept;
+            if (valCodeableConcept && valCodeableConcept.coding && valCodeableConcept.coding.length > 0)
+            {
+                rawText = valCodeableConcept.coding[0].display || @"";
+            }
+            [childNode setSymptomText:rawText];
+            [[node subrows] addObject:childNode];
+        }
+    }
+
+    [node updateCriteriaAndDisplayValues];
+    return node;
+}
+
+- (id)_flattenFHIRGroup:(id)group
+{
+    if (!group) return nil;
+
+    var flattenedCharacteristics = [];
+    var characteristics = group.characteristic || [];
+
+    for (var i = 0; i < characteristics.length; i++)
+    {
+        var charItem = characteristics[i];
+        var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
+
+        if (isSubgroup)
+        {
+            var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
+
+            if (flattenedSubgroup.combinationMethod === group.combinationMethod)
+            {
+                var subCharacteristics = flattenedSubgroup.characteristic || [];
+                for (var j = 0; j < subCharacteristics.length; j++)
+                {
+                    flattenedCharacteristics.push(subCharacteristics[j]);
+                }
+            }
+            else
+            {
+                flattenedCharacteristics.push(flattenedSubgroup);
+            }
+        }
+        else
+        {
+            flattenedCharacteristics.push(charItem);
+        }
+    }
+
+    group.characteristic = flattenedCharacteristics;
     return group;
 }
 
@@ -1013,31 +1332,28 @@
     {
         _isImportingJSON = YES;
 
-        // 1. Safe clear: dismantle rows in reverse order with includeSubrows:NO
-        var count = [_ruleEditor numberOfRows];
-        if (count > 0)
+        var flattenedGroup = [self _flattenFHIRGroup:rootGroup];
+        var rootNode = [self nodeFromFHIRGroup:flattenedGroup];
+
+        var flatList = [CPMutableArray array];
+        if (rootNode)
         {
-            for (var i = count - 1; i >= 0; i--)
+            var combinationMethod = flattenedGroup.combinationMethod || "all-of";
+            if (combinationMethod === "any-of")
             {
-                var indexes = [CPIndexSet indexSetWithIndex:i];
-                [_ruleEditor removeRowsAtIndexes:indexes includeSubrows:NO];
+                [self flattenNode:rootNode depth:0 intoArray:flatList];
+            }
+            else
+            {
+                var children = [rootNode subrows];
+                for (var i = 0; i < [children count]; i++)
+                {
+                    [self flattenNode:children[i] depth:0 intoArray:flatList];
+                }
             }
         }
 
-        // Reset the text-field cache dictionary
-        _importedTextFieldsByRow = [CPMutableDictionary dictionary];
-
-        var rootRows = [_ruleEditor _rootRowsArray];
-        // rootRows is now empty.
-
-        // 2. Build the recursive tree structure in memory
-        var indexWrapper = { value: 0 };
-        var rootRow = [self _buildRowObjectFromFHIRGroup:rootGroup targetTextFieldIndex:indexWrapper];
-
-        if (rootRow)
-        {
-            [rootRows addObject:rootRow];
-        }
+        [self setRootNodes:flatList];
 
         [self performSelector:@selector(_enableImporting) withObject:nil afterDelay:0];
     }
@@ -1046,87 +1362,6 @@
         console.error("[FHIR Error] Exception in structural reconstruction: ", e);
         _isImportingJSON = NO;
     }
-}
-
-- (id)_buildRowObjectFromFHIRGroup:(id)group targetTextFieldIndex:(id)indexWrapper
-{
-    if (!group) return nil;
-
-    var combinationMethod = group.combinationMethod || "all-of";
-    var predicateType = (combinationMethod === "any-of") ? CPOrPredicateType : CPAndPredicateType;
-    var dispAllAny = (predicateType === CPOrPredicateType) ? @"Any" : @"All";
-
-    // Instantiate and configure the compound group row object
-    var rootRow = [[_CPRuleEditorRowObject alloc] init];
-    [rootRow setRowType:CPRuleEditorRowTypeCompound];
-    [rootRow setCriteria:[CPArray arrayWithObjects:predicateType, @"_logical_text_", nil]];
-    [rootRow setDisplayValues:[CPArray arrayWithObjects:dispAllAny, @"of the following are true", nil]];
-
-    // Increment indexWrapper for this Compound row
-    indexWrapper.value = indexWrapper.value + 1;
-
-    var subrowsArray = [CPMutableArray array];
-    var characteristics = group.characteristic || [];
-
-    for (var i = 0; i < characteristics.length; i++)
-    {
-        var charItem = characteristics[i];
-
-        // Case A: Recurse into subgroup
-        if (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod)
-        {
-            var subgroupRow = [self _buildRowObjectFromFHIRGroup:charItem targetTextFieldIndex:indexWrapper];
-            if (subgroupRow)
-            {
-                [subrowsArray addObject:subgroupRow];
-            }
-        }
-        // Case B: Create simple symptom characteristic
-        else
-        {
-            var rawText = @"";
-            var valCodeableConcept = charItem.valueCodeableConcept;
-            if (valCodeableConcept && valCodeableConcept.coding && valCodeableConcept.coding.length > 0)
-            {
-                rawText = valCodeableConcept.coding[0].display || @"";
-            }
-
-            var presence = charItem.exclude ? @"exclusion" : @"inclusion";
-            var dispInclusionExclusion = (presence === @"exclusion") ? @"Must NOT be present (Exclusion)" : @"Must be present (Inclusion)";
-
-            var inputField = [[CPTextField alloc] initWithFrame:CGRectMake(0, 0, 160, 24)];
-            [inputField setEditable:YES];
-            [inputField setBezeled:YES];
-            [inputField setBackgroundColor:[CPColor whiteColor]];
-            [inputField setPlaceholderString:@"e.g., Corneal erosion"];
-            [inputField setStringValue:rawText];
-            [inputField setTarget:self];
-            [inputField setAction:@selector(ruleEditorDidChange:)];
-
-            [[CPNotificationCenter defaultCenter] addObserver:self
-                                                     selector:@selector(ruleEditorDidChange:)
-                                                         name:CPControlTextDidChangeNotification
-                                                       object:inputField];
-
-            // Map the input field to its target row index sequentially
-            var targetRowIndex = indexWrapper.value;
-            [_importedTextFieldsByRow setObject:inputField forKey:[CPNumber numberWithInt:targetRowIndex]];
-            
-            // Increment indexWrapper for this Simple row
-            indexWrapper.value = indexWrapper.value + 1;
-
-            var childRow = [[_CPRuleEditorRowObject alloc] init];
-            [childRow setRowType:CPRuleEditorRowTypeSimple];
-            [childRow setCriteria:[CPArray arrayWithObjects:@"phenotype", presence, @"_value_field_", nil]];
-            [childRow setDisplayValues:[CPArray arrayWithObjects:@"Symptom / Phenotype", dispInclusionExclusion, inputField, nil]];
-            [childRow setSubrows:[CPArray array]];
-
-            [subrowsArray addObject:childRow];
-        }
-    }
-
-    [rootRow setSubrows:subrowsArray];
-    return rootRow;
 }
 
 - (void)_enableImporting
