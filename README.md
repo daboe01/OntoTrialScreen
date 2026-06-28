@@ -5,6 +5,7 @@ An integrated, full-stack environment designed for structured clinical trial eli
 This system bridges the gap between unstructured clinical study protocol narratives and the structured, codifiable FHIR R6 `Group` resource standards.
 
 ---
+<img width="1430" height="502" alt="Bildschirmfoto 2026-06-28 um 11 07 28" src="https://github.com/user-attachments/assets/e3636cdb-0b22-48fe-9021-80a8be717ab9" />
 
 ## Architecture Overview
 
