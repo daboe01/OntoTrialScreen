@@ -1,6 +1,6 @@
 /*
  * AppController.j
- * Integrated FHIR R6 Eligibility Criteria Editor & HPO Tree Browser
+ * Integrated FHIR R6 Eligibility Criteria Editor, HPO Tree Browser & Phenopacket Extractor
  */
 
 @import <Foundation/Foundation.j>
@@ -16,19 +16,19 @@
 {
     var selectedRow = [self selectedRow];
     if (selectedRow === -1) return;
-    
+
     var item = [self itemAtRow:selectedRow];  // CPTreeNode wrapping the model when bound
     var node = item ? [item representedObject] : nil; // HPONode model object
     if (!node || [node name] === @"Loading...") return;
 
     var termId = [node termId];
     var formattedId = "HP:" + [CPString stringWithFormat:"%07d", termId + 0];
-    
+
     // Safely wrap in CPDictionary to avoid plist serialization exceptions
     var dict = [CPDictionary dictionaryWithObjectsAndKeys:
-                formattedId, @"code",
+                    formattedId, @"code",
                 [node name], @"display"
-               ];
+    ];
 
     var pboard = [CPPasteboard pasteboardWithName:CPDragPboard];
     [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
@@ -38,7 +38,7 @@
     // Create a styled, visible drag view with a background color
     var dragView = [[CPView alloc] initWithFrame:CGRectMake(0, 0, 150, 20)];
     [dragView setBackgroundColor:[CPColor colorWithRed:0.0 green:0.5 blue:0.7 alpha:0.85]];
-    
+
     // Add a text label inside the drag view to represent the term being dragged
     var dragLabel = [[CPTextField alloc] initWithFrame:CGRectMake(5, 2, 140, 16)];
     [dragLabel setStringValue:[node name]];
@@ -102,14 +102,14 @@
 - (CGSize)_minimumFrameSize
 {
     var minSize = [self currentValueForThemeAttribute:@"min-size"],
-        contentInset = [self currentValueForThemeAttribute:@"content-inset"];
+    contentInset = [self currentValueForThemeAttribute:@"content-inset"];
 
     var size = CGSizeMake(0, 18); // Compact 18px height to fit cleanly in the 28px Rule Editor row
     var rep = [self representedObject];
     if (rep && rep.code)
     {
         var codeWidth = [rep.code sizeWithFont:[CPFont boldSystemFontOfSize:8.0]].width + 10;
-        
+
         var displayText = rep.display || @"";
         if (displayText.length > 10) {
             displayText = [displayText substringToIndex:10] + @"...";
@@ -127,7 +127,7 @@
 - (void)layoutSubviews
 {
     [super layoutSubviews];
-    
+
     // Completely silence and transparentize the default text element natively
     if (self._DOMTextElement) {
         self._DOMTextElement.innerHTML = "";
@@ -135,7 +135,7 @@
         self._DOMTextElement.style.visibility = "hidden";
         self._DOMTextElement.style.color = "transparent";
     }
-    
+
     var rep = [self representedObject];
     if (rep && rep.code)
     {
@@ -148,7 +148,7 @@
             [codeLabel setTag:101];
             [self addSubview:codeLabel];
         }
-        
+
         var textLabel = [self viewWithTag:102];
         if (!textLabel)
         {
@@ -156,12 +156,12 @@
             [textLabel setTag:102];
             [self addSubview:textLabel];
         }
-        
+
         // Render text and apply robust centering and sizing via pure CSS
         if (codeLabel._DOMElement)
         {
             codeLabel._DOMElement.innerHTML = rep.code;
-            
+
             var codeStyle = codeLabel._DOMElement.style;
             codeStyle.backgroundColor = "rgb(0, 128, 180)";
             codeStyle.borderRadius = "3px";
@@ -181,7 +181,7 @@
         if (textLabel._DOMElement)
         {
             textLabel._DOMElement.innerHTML = displayText;
-            
+
             var textStyle = textLabel._DOMElement.style;
             textStyle.color = "rgb(100, 100, 100)";
             textStyle.lineHeight = "12px";
@@ -189,11 +189,11 @@
             textStyle.fontSize = "9px";
             textStyle.fontFamily = "sans-serif";
         }
-        
+
         var bounds = [self bounds];
         var codeWidth = [rep.code sizeWithFont:[CPFont boldSystemFontOfSize:8.0]].width + 10;
         var textWidth = [displayText sizeWithFont:[CPFont systemFontOfSize:9.0]].width + 6;
-        
+
         // Position badge and label inside the 18px high token (perfect vertical centering at y=3)
         [codeLabel setFrame:CGRectMake(4, 3, codeWidth, 12)];
         [textLabel setFrame:CGRectMake(codeWidth + 8, 3, textWidth, 12)];
@@ -218,7 +218,7 @@
     self = [super initWithFrame:aFrame];
     if (self) {
         [self setBackgroundColor:[CPColor colorWithRed:0.96 green:0.98 blue:1.0 alpha:1.0]];
-        
+
         // Apply dashed border styling
         self._DOMElement.style.border = "1.5px dashed #0080B4";
         self._DOMElement.style.borderRadius = "5px";
@@ -277,13 +277,13 @@
 
     var pboard = [CPPasteboard pasteboardWithName:CPDragPboard];
     [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
-    
+
     // Avoid raw object plist serialization errors by using a CPDictionary
     var dict = [CPDictionary dictionaryWithObjectsAndKeys:
-                _representedTerm.code, @"code",
+                    _representedTerm.code, @"code",
                 _representedTerm.display, @"display"
-               ];
-    
+    ];
+
     [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
     [pboard setString:_representedTerm.code forType:CPStringPboardType];
 
@@ -397,7 +397,7 @@
                 var mutableTokens = [CPMutableArray arrayWithArray:tokens];
                 [mutableTokens addObject:{ "code": code, "display": display }];
                 [self setObjectValue:mutableTokens];
-                
+
                 if (_editorController)
                 {
                     [_editorController ruleEditorDidChange:self];
@@ -553,7 +553,7 @@
         if (!_presenceMode) {
             _presenceMode = _exclude ? @"neither-present" : @"all-present";
         }
-        
+
         var dispPresence = @"All must be present";
         if (_presenceMode === @"any-present") {
             dispPresence = @"Any must be present";
@@ -709,18 +709,18 @@
             var tokenField = [[HPOTokenField alloc] initWithFrame:CGRectMake(0, 0, 320, 24)];
             [tokenField setEditorController:_controller];
             [tokenField registerForDraggedTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", nil]];
-            
+
             [tokenField setEditable:YES];
             [tokenField setBezeled:YES];
             [tokenField setBackgroundColor:[CPColor whiteColor]];
             [tokenField setPlaceholderString:@"Drag and drop HPO codes here..."];
-            
+
             [tokenField setDelegate:_controller];
-            
+
             // Populate tokens
             var hpoTokens = [node hpoTokens] || [];
             [tokenField setObjectValue:hpoTokens];
-            
+
             [tokenField setTarget:_controller];
             [tokenField setAction:@selector(ruleEditorDidChange:)];
 
@@ -821,6 +821,18 @@
     CPArray              _downstreamTerms;
     CPArray              _matchedIndexPaths;
     int                  _currentMatchIndex;
+
+    // Phenopacket Extractor UI elements
+    CPTextView           _reportInputTextView;
+    CPTextView           _phenopacketOutputTextView;
+    CPButton             _extractPhenoButton;
+    CPButton             _extractICD10Button;
+    CPTextField          _extractStatusLabel;
+
+    CPButton             _matchButton;
+    CPTextField          _matchStatusLabel;
+    CPTableView          _crossmatchTableView;
+    CPArray              _crossmatchResults;
 }
 
 - (void)applicationDidFinishLaunching:(CPNotification)aNotification
@@ -888,13 +900,13 @@
 
     var termId = [node termId];
     var formattedId = "HP:" + [CPString stringWithFormat:"%07d", termId + 0];
-    
+
     // Package securely as CPDictionary to stop deserializer exceptions
     var dict = [CPDictionary dictionaryWithObjectsAndKeys:
-                formattedId, @"code",
+                    formattedId, @"code",
                 [node name], @"display"
-               ];
-               
+    ];
+
     [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
     [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
     [pboard setString:formattedId forType:CPStringPboardType];
@@ -910,13 +922,13 @@
 
         var term = _downstreamTerms[clickedRow];
         var formattedId = "HP:" + [CPString stringWithFormat:"%07d", term.id + 0];
-        
+
         // Package securely as CPDictionary to stop deserializer exceptions
         var dict = [CPDictionary dictionaryWithObjectsAndKeys:
-                    formattedId, @"code",
+                        formattedId, @"code",
                     term.label, @"display"
-                   ];
-                   
+        ];
+
         [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
         [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
         [pboard setString:formattedId forType:CPStringPboardType];
@@ -931,10 +943,14 @@
 
 - (void)_buildIntegratedWorkspace
 {
+    var tabViewBounds = [_tabView bounds];
+
+    // ==========================================
+    // TAB 1: Clinical Eligibility & HPO Workspace
+    // ==========================================
     var mainTab = [[CPTabViewItem alloc] initWithIdentifier:@"workspaceTab"];
     [mainTab setLabel:@"Clinical Eligibility & HPO Workspace"];
 
-    var tabViewBounds = [_tabView bounds];
     var mainView = [[CPView alloc] initWithFrame:tabViewBounds];
     [mainTab setView:mainView];
     [_tabView addTabViewItem:mainTab];
@@ -942,8 +958,8 @@
     var mainSplitView = [[CPSplitView alloc] initWithFrame:[mainView bounds]];
     [mainSplitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [mainSplitView setVertical:YES];
-    
-    [mainView addSubview:mainSplitView]; 
+
+    [mainView addSubview:mainSplitView];
 
     var leftWidth = CGRectGetWidth([mainView bounds]) * 0.35;
     var rightWidth = CGRectGetWidth([mainView bounds]) - leftWidth - [mainSplitView dividerThickness];
@@ -965,18 +981,18 @@
     [_synopsisInputTextView setFont:[CPFont fontWithName:@"Helvetica" size:12.0]];
 
     var demoSynopsis = "Clinical Study Protocol Synopsis: Dry Eye Syndrome Efficacy Trial (Phase II)\n\n" +
-                       "Objective:\n" +
-                       "To evaluate the efficacy and safety of Ophthalmic Solution DBB-026 in patients with moderate to severe Keratoconjunctivitis Sicca (Dry Eye Disease).\n\n" +
-                       "Patient Eligibility Criteria:\n\n" +
-                       "Inclusion Criteria:\n" +
-                       "- Patient must have a documented clinical diagnosis of Keratoconjunctivitis Sicca (Dry Eye Disease).\n" +
-                       "- Patient must present with clear evidence of corneal epithelial erosion or punctate keratitis.\n" +
-                       "- Subjective symptoms must include severe ocular discomfort, foreign body sensation, or persistent ocular burning.\n" +
-                       "- Decreased tear production must be confirmed with a Schirmer's I test result of 10 mm/5 minutes or less.\n\n" +
-                       "Exclusion Criteria:\n" +
-                       "- Must NOT have any active ocular infection (such as bacterial conjunctivitis, keratitis, or blepharitis).\n" +
-                       "- No history of refractive corneal surgery (e.g., LASIK, PRK) within the past 180 days.\n" +
-                       "- Patients with secondary Sjögren's syndrome or active ocular allergy are excluded.";
+    "Objective:\n" +
+    "To evaluate the efficacy and safety of Ophthalmic Solution DBB-026 in patients with moderate to severe Keratoconjunctivitis Sicca (Dry Eye Disease).\n\n" +
+    "Patient Eligibility Criteria:\n\n" +
+    "Inclusion Criteria:\n" +
+    "- Patient must have a documented clinical diagnosis of Keratoconjunctivitis Sicca (Dry Eye Disease).\n" +
+    "- Patient must present with clear evidence of corneal epithelial erosion or punctate keratitis.\n" +
+    "- Subjective symptoms must include severe ocular discomfort, foreign body sensation, or persistent ocular burning.\n" +
+    "- Decreased tear production must be confirmed with a Schirmer's I test result of 10 mm/5 minutes or less.\n\n" +
+    "Exclusion Criteria:\n" +
+    "- Must NOT have any active ocular infection (such as bacterial conjunctivitis, keratitis, or blepharitis).\n" +
+    "- No history of refractive corneal surgery (e.g., LASIK, PRK) within the past 180 days.\n" +
+    "- Patients with secondary Sjögren's syndrome or active ocular allergy are excluded.";
 
     [_synopsisInputTextView setString:demoSynopsis];
 
@@ -1189,7 +1205,7 @@
     var synScrollHeight = tabHeight - defScrollHeight - 35;
 
     var defScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(5, 5, detailsWidth - 10, defScrollHeight)];
-    [defScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [defScroll setAutoresizingMask:CPViewWidthSizable];
     [defScroll setAutohidesScrollers:YES];
     [defScroll setHasHorizontalScroller:NO];
 
@@ -1282,6 +1298,152 @@
     [mainSplitView addSubview:leftContainer];
     [mainSplitView addSubview:rightContainer];
 
+
+    // ==========================================
+    // TAB 2: Phenopacket / ICD Extractor
+    // ==========================================
+    var phenoTab = [[CPTabViewItem alloc] initWithIdentifier:@"phenoTab"];
+    [phenoTab setLabel:@"Phenopacket / ICD Extractor"];
+    var phenoView = [[CPView alloc] initWithFrame:tabViewBounds];
+    [phenoTab setView:phenoView];
+    [_tabView addTabViewItem:phenoTab];
+
+    var extractorSplitHeight = CGRectGetHeight(tabViewBounds) - 90;
+    var extractorSplit = [[CPSplitView alloc] initWithFrame:CGRectMake(20, 20, CGRectGetWidth(tabViewBounds) - 40, extractorSplitHeight)];
+    [extractorSplit setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [extractorSplit setVertical:YES]; // Left/Right panes
+
+    var extractorWidth = CGRectGetWidth([extractorSplit bounds]);
+    var extractorDivider = [extractorSplit dividerThickness];
+    var halfWidth = (extractorWidth - extractorDivider) / 2;
+
+    // --- Extractor Left: Input ---
+    var inputBox = [[CPBox alloc] initWithFrame:CGRectMake(0, 0, halfWidth, extractorSplitHeight)];
+    [inputBox setTitle:@"Narrative Medical Report"];
+    [inputBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+
+    var inputScroll2 = [[CPScrollView alloc] initWithFrame:[[inputBox contentView] bounds]];
+    [inputScroll2 setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [inputScroll2 setAutohidesScrollers:YES];
+
+    _reportInputTextView = [[CPTextView alloc] initWithFrame:[inputScroll2 bounds]];
+    [_reportInputTextView setAutoresizingMask:CPViewWidthSizable];
+    [inputScroll2 setDocumentView:_reportInputTextView];
+
+    [[inputBox contentView] addSubview:inputScroll2];
+    [extractorSplit addSubview:inputBox];
+
+    // --- Extractor Right: Output ---
+    var outputBox = [[CPBox alloc] initWithFrame:CGRectMake(0, 0, halfWidth, extractorSplitHeight)];
+    [outputBox setTitle:@"Extracted Phenopacket (JSON)"];
+    [outputBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+
+    var outputScroll2 = [[CPScrollView alloc] initWithFrame:[[outputBox contentView] bounds]];
+    [outputScroll2 setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [outputScroll2 setAutohidesScrollers:YES];
+
+    _phenopacketOutputTextView = [[CPTextView alloc] initWithFrame:[outputScroll2 bounds]];
+    [_phenopacketOutputTextView setAutoresizingMask:CPViewWidthSizable];
+    [_phenopacketOutputTextView setEditable:NO];
+    [_phenopacketOutputTextView setSelectable:YES];
+    [outputScroll2 setDocumentView:_phenopacketOutputTextView];
+
+    [[outputBox contentView] addSubview:outputScroll2];
+    [extractorSplit addSubview:outputBox];
+
+    [phenoView addSubview:extractorSplit];
+
+    // --- Extract Buttons ---
+    _extractPhenoButton = [[CPButton alloc] initWithFrame:CGRectMake(20, CGRectGetMaxY([extractorSplit frame]) + 15, 180, 30)];
+    [_extractPhenoButton setTitle:@"Extract phenopacket"];
+    [_extractPhenoButton setAutoresizingMask:CPViewMinYMargin | CPViewMaxXMargin];
+    [_extractPhenoButton setTarget:self];
+    [_extractPhenoButton setAction:@selector(extractPhenopacketAction:)];
+    [phenoView addSubview:_extractPhenoButton];
+
+    _extractICD10Button = [[CPButton alloc] initWithFrame:CGRectMake(210, CGRectGetMaxY([extractorSplit frame]) + 15, 150, 30)];
+    [_extractICD10Button setTitle:@"Extract ICD-10"];
+    [_extractICD10Button setAutoresizingMask:CPViewMinYMargin | CPViewMaxXMargin];
+    [_extractICD10Button setTarget:self];
+    [_extractICD10Button setAction:@selector(extractICD10Action:)];
+    [phenoView addSubview:_extractICD10Button];
+
+    // Status Label
+    _extractStatusLabel = [[CPTextField alloc] initWithFrame:CGRectMake(CGRectGetMaxX([_extractICD10Button frame]) + 20, CGRectGetMinY([_extractPhenoButton frame]) + 5 , 200, 20)];
+    [_extractStatusLabel setStringValue:@""];
+    [_extractStatusLabel setAutoresizingMask:CPViewMaxXMargin | CPViewMinYMargin];
+    [_extractStatusLabel setAlignment:CPLeftTextAlignment];
+    [phenoView addSubview:_extractStatusLabel];
+
+    // ==========================================
+    // TAB 3: Crossmatch results
+    // ==========================================
+    var crossmatchTab = [[CPTabViewItem alloc] initWithIdentifier:@"crossmatchTab"];
+    [crossmatchTab setLabel:@"Crossmatch results"];
+    var crossmatchView = [[CPView alloc] initWithFrame:tabViewBounds];
+    [crossmatchTab setView:crossmatchView];
+    [_tabView addTabViewItem:crossmatchTab];
+
+    _crossmatchResults = [];
+
+    // Oben: Panel für Match-Aktion und Statusanzeige
+    var matchPanel = [[CPView alloc] initWithFrame:CGRectMake(20, 20, tabViewBounds.size.width - 40, 50)];
+    [matchPanel setAutoresizingMask:CPViewWidthSizable | CPViewMaxYMargin];
+    [crossmatchView addSubview:matchPanel];
+
+    _matchButton = [[CPButton alloc] initWithFrame:CGRectMake(0, 10, 180, 30)];
+    [_matchButton setTitle:@"Run Patient Matching"];
+    [_matchButton setTarget:self];
+    [_matchButton setAction:@selector(runPatientMatchingAction:)];
+    [matchPanel addSubview:_matchButton];
+
+    _matchStatusLabel = [[CPTextField alloc] initWithFrame:CGRectMake(200, 15, tabViewBounds.size.width - 260, 20)];
+    [_matchStatusLabel setFont:[CPFont boldSystemFontOfSize:13.0]];
+    [_matchStatusLabel setStringValue:@"Ready to crossmatch. Please compile/extract study criteria and a phenopacket first."];
+    [_matchStatusLabel setTextColor:[CPColor grayColor]];
+    [_matchStatusLabel setAutoresizingMask:CPViewWidthSizable];
+    [matchPanel addSubview:_matchStatusLabel];
+
+    // Darunter: CPTableView für Phänotypen
+    var tableScroll = [[CPScrollView alloc] initWithFrame:CGRectMake(20, 80, tabViewBounds.size.width - 40, tabViewBounds.size.height - 150)];
+    [tableScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [tableScroll setAutohidesScrollers:YES];
+    [tableScroll setBorderType:CPBezelBorder];
+    [crossmatchView addSubview:tableScroll];
+
+    _crossmatchTableView = [[CPTableView alloc] initWithFrame:[tableScroll bounds]];
+    [_crossmatchTableView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
+    [_crossmatchTableView setRowHeight:26.0];
+    [_crossmatchTableView setDataSource:self];
+    [_crossmatchTableView setDelegate:self];
+
+    // Spalte 1: Match Status (Farbiger Kreis-Indikator)
+    var statusCol = [[CPTableColumn alloc] initWithIdentifier:@"status"];
+    [[statusCol headerView] setStringValue:@"Match Status"];
+    [statusCol setWidth:130];
+    [_crossmatchTableView addTableColumn:statusCol];
+
+    // Spalte 2: Patient HPO Code
+    var patientHpoCol = [[CPTableColumn alloc] initWithIdentifier:@"patient_hpo"];
+    [[patientHpoCol headerView] setStringValue:@"Patient HPO"];
+    [patientHpoCol setWidth:110];
+    [_crossmatchTableView addTableColumn:patientHpoCol];
+
+    // Spalte 3: Patient Phänotyp Bezeichnung
+    var patientLabelCol = [[CPTableColumn alloc] initWithIdentifier:@"patient_label"];
+    [[patientLabelCol headerView] setStringValue:@"Patient Phenotype Label"];
+    [patientLabelCol setWidth:240];
+    [_crossmatchTableView addTableColumn:patientLabelCol];
+
+    // Spalte 4: Matched Study Criterion
+    var matchedCriterionCol = [[CPTableColumn alloc] initWithIdentifier:@"matched_criterion"];
+    [[matchedCriterionCol headerView] setStringValue:@"Matched Study Criterion"];
+    [matchedCriterionCol setWidth:280];
+    [_crossmatchTableView addTableColumn:matchedCriterionCol];
+
+    [tableScroll setDocumentView:_crossmatchTableView];
+
+    // Finish building layout
     [self resetEditor:self];
 
     [outlineView bind:@"content" toObject:treeController withKeyPath:@"arrangedObjects" options:nil];
@@ -1319,7 +1481,7 @@
         else if (item.symptom)
         {
             var sym = item.symptom;
-            
+
             var tokens = [];
             var rawLabels = sym.labels || (sym.label ? [sym.label] : []);
             for (var k = 0; k < rawLabels.length; k++) {
@@ -1511,7 +1673,7 @@
     [CPURLConnection sendAsynchronousRequest:request
                                        queue:[CPOperationQueue mainQueue]
                            completionHandler:function(response, data, error)
-    {
+     {
         [_extractButton setEnabled:YES];
         [_extractButton setTitle:@"Extract FHIR Criteria"];
 
@@ -1535,6 +1697,112 @@
         } else {
             var errorMsg = (error) ? [error localizedDescription] : @"Could not connect to database services.";
             alert("Model Extraction Failure:\n" + errorMsg);
+        }
+    }];
+}
+
+// --------------------------------------------------------------------------------
+// Phenopacket & ICD-10 Extractor Actions
+// --------------------------------------------------------------------------------
+
+- (void)extractPhenopacketAction:(id)sender
+{
+    var narrativeText = [_reportInputTextView string];
+
+    if (!narrativeText || [narrativeText length] === 0) {
+        [_phenopacketOutputTextView setString:@"Please paste a medical report on the left before extracting."];
+        return;
+    }
+
+    var selectedModel = [_modelPopUpButton titleOfSelectedItem];
+
+    [_extractPhenoButton setEnabled:NO];
+    [_extractPhenoButton setTitle:@"Extracting..."];
+    [_phenopacketOutputTextView setString:@"Extracting phenopacket, please wait..."];
+
+    [_extractStatusLabel setStringValue:@"Extracting..."];
+    [self startExtractPulsatingAnimation];
+
+    var request = [CPURLRequest requestWithURL:"/DBB/extract_phenopacket"];
+    [request setHTTPMethod:@"POST"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    var payload = { "report": narrativeText, "model": selectedModel };
+    var postData = [CPString stringWithString:JSON.stringify(payload)];
+    [request setHTTPBody:postData];
+
+    [CPURLConnection sendAsynchronousRequest:request
+                                       queue:[CPOperationQueue mainQueue]
+                           completionHandler:function(response, data, error)
+     {
+        [_extractPhenoButton setEnabled:YES];
+        [_extractPhenoButton setTitle:@"Extract phenopacket"];
+        [self stopExtractPulsatingAnimation];
+        [_extractStatusLabel setStringValue:@""];
+
+        if (!error && data) {
+            try {
+                var parsedData = JSON.parse(data);
+                var prettyJSON = JSON.stringify(parsedData, null, 4);
+                [_phenopacketOutputTextView setString:prettyJSON];
+            } catch (e) {
+                [_phenopacketOutputTextView setString:data];
+            }
+        } else {
+            var errorMsg = (error) ? [error localizedDescription] : @"Unknown error occurred.";
+            [_phenopacketOutputTextView setString:@"Failed to extract phenopacket:\n\n" + errorMsg];
+            console.log("Extraction Error: ", error);
+        }
+    }];
+}
+
+- (void)extractICD10Action:(id)sender
+{
+    var narrativeText = [_reportInputTextView string];
+
+    if (!narrativeText || [narrativeText length] === 0) {
+        [_phenopacketOutputTextView setString:@"Please paste a medical report on the left before extracting."];
+        return;
+    }
+
+    var selectedModel = [_modelPopUpButton titleOfSelectedItem];
+
+    [_extractICD10Button setEnabled:NO];
+    [_extractICD10Button setTitle:@"Extracting..."];
+    [_phenopacketOutputTextView setString:@"Extracting ICD-10 codes, please wait..."];
+
+    [_extractStatusLabel setStringValue:@"Extracting..."];
+    [self startExtractPulsatingAnimation];
+
+    var request = [CPURLRequest requestWithURL:"/DBB/extract_icd10"];
+    [request setHTTPMethod:@"POST"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    var payload = { "report": narrativeText, "model": selectedModel };
+    var postData = [CPString stringWithString:JSON.stringify(payload)];
+    [request setHTTPBody:postData];
+
+    [CPURLConnection sendAsynchronousRequest:request
+                                       queue:[CPOperationQueue mainQueue]
+                           completionHandler:function(response, data, error)
+     {
+        [_extractICD10Button setEnabled:YES];
+        [_extractICD10Button setTitle:@"Extract ICD-10"];
+        [self stopExtractPulsatingAnimation];
+        [_extractStatusLabel setStringValue:@""];
+
+        if (!error && data) {
+            try {
+                var parsedData = JSON.parse(data);
+                var prettyJSON = JSON.stringify(parsedData, null, 4);
+                [_phenopacketOutputTextView setString:prettyJSON];
+            } catch (e) {
+                [_phenopacketOutputTextView setString:data];
+            }
+        } else {
+            var errorMsg = (error) ? [error localizedDescription] : @"Unknown error occurred.";
+            [_phenopacketOutputTextView setString:@"Failed to extract ICD-10:\n\n" + errorMsg];
+            console.log("Extraction Error: ", error);
         }
     }];
 }
@@ -1652,7 +1920,7 @@
 - (id)resolveReferencesInItem:(id)item withMap:(id)containedMap
 {
     if (!item || typeof item !== 'object') return item;
-    
+
     if (item.valueReference && item.valueReference.reference) {
         var ref = item.valueReference.reference;
         var referenced = containedMap[ref];
@@ -1662,7 +1930,7 @@
             return resolved;
         }
     }
-    
+
     if (Array.isArray(item)) {
         var arr = [];
         for (var i = 0; i < item.length; i++) {
@@ -1670,7 +1938,7 @@
         }
         return arr;
     }
-    
+
     var keys = Object.keys(item);
     var result = {};
     for (var i = 0; i < keys.length; i++) {
@@ -1686,29 +1954,29 @@
     if (!group) return nil;
 
     var node = [[FHIRCriteriaNode alloc] init];
-    
+
     var isCompound = NO;
     var combMethod = group.combinationMethod || "all-of";
     var characteristics = group.characteristic || [];
-    
+
     if (characteristics.length > 0 || group.resourceType === "Group")
     {
         isCompound = YES;
     }
-    
+
     if (isCompound)
     {
         [node setRowType:CPRuleEditorRowTypeCompound];
         [node setCombinationMethod:combMethod];
         [node updateCriteriaAndDisplayValues];
-        
+
         var subrows = [CPMutableArray array];
         for (var i = 0; i < characteristics.length; i++)
         {
             var charItem = characteristics[i];
             var isCompositeSubgroup = NO;
             var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
-            
+
             // Check for composite grouping: either via ID prefix or structural content analysis
             if (isSubgroup)
             {
@@ -1741,9 +2009,9 @@
             {
                 var subNode = [[FHIRCriteriaNode alloc] init];
                 [subNode setRowType:CPRuleEditorRowTypeSimple];
-                
+
                 var isExclude = (charItem.exclude === true);
-                
+
                 if (!isExclude && charItem.characteristic)
                 {
                     for (var m = 0; m < charItem.characteristic.length; m++)
@@ -1766,7 +2034,7 @@
                     presenceMode = @"any-present";
                 }
                 [subNode setPresenceMode:presenceMode];
-                
+
                 var tokens = [];
                 var subChars = charItem.characteristic || [];
 
@@ -1798,13 +2066,13 @@
                         }
                     }
                 }
-                
+
                 [subNode setHpoTokens:tokens];
                 if (tokens.length > 0)
                 {
                     [subNode setSymptomText:tokens[0].display];
                 }
-                
+
                 [subNode updateCriteriaAndDisplayValues];
                 [subrows addObject:subNode];
             }
@@ -1820,7 +2088,7 @@
             {
                 var subNode = [[FHIRCriteriaNode alloc] init];
                 [subNode setRowType:CPRuleEditorRowTypeSimple];
-                
+
                 var isExclude = (charItem.exclude === true);
                 var presenceMode = @"all-present";
                 if (isExclude || charItem.combinationMethod === "neither-of")
@@ -1832,7 +2100,7 @@
                     presenceMode = @"any-present";
                 }
                 [subNode setPresenceMode:presenceMode];
-                
+
                 var tokens = [];
                 var valueCodeableConcept = charItem.valueCodeableConcept;
                 if (valueCodeableConcept && valueCodeableConcept.coding)
@@ -1858,13 +2126,13 @@
                         }
                     }
                 }
-                
+
                 [subNode setHpoTokens:tokens];
                 if (tokens.length > 0)
                 {
                     [subNode setSymptomText:tokens[0].display];
                 }
-                
+
                 [subNode updateCriteriaAndDisplayValues];
                 [subrows addObject:subNode];
             }
@@ -1885,7 +2153,7 @@
             presenceMode = @"any-present";
         }
         [node setPresenceMode:presenceMode];
-        
+
         var tokens = [];
         var valueCodeableConcept = group.valueCodeableConcept;
         if (valueCodeableConcept && valueCodeableConcept.coding)
@@ -1916,10 +2184,10 @@
         {
             [node setSymptomText:tokens[0].display];
         }
-        
+
         [node updateCriteriaAndDisplayValues];
     }
-    
+
     return node;
 }
 
@@ -2058,25 +2326,25 @@
         {
             var tokenField = [childNode tokenField];
             var tokens = tokenField ? [tokenField objectValue] : [];
-            
+
             // Multiple Tokens: Compile as a contained composite subgroup
             if (tokens.length > 1)
             {
                 subgroupCounter.value = subgroupCounter.value + 1;
                 var compositeID = "composite-symptom-" + subgroupCounter.value;
-                
+
                 var subGroup = [CPMutableDictionary dictionary];
                 [subGroup setObject:@"Group" forKey:@"resourceType"];
                 [subGroup setObject:compositeID forKey:@"id"];
                 [subGroup setObject:@"conceptual" forKey:@"membership"];
                 [subGroup setObject:@"person" forKey:@"type"];
-                
+
                 var subCombMethod = @"all-of";
                 if ([[childNode presenceMode] isEqualToString:@"any-present"]) {
                     subCombMethod = @"any-of";
                 }
                 [subGroup setObject:subCombMethod forKey:@"combinationMethod"];
-                
+
                 var subCharacteristics = [CPMutableArray array];
                 var isExclude = [[childNode presenceMode] isEqualToString:@"neither-present"];
 
@@ -2086,36 +2354,36 @@
                     var subCharItem = [CPMutableDictionary dictionary];
                     [subCharItem setObject:{
                         "coding": [
-                            {
-                                "system": "http://snomed.info/sct",
-                                "code": "8116006",
-                                "display": "Phänotypisches Merkmal"
-                            }
-                        ]
+                                   {
+                                       "system": "http://snomed.info/sct",
+                                       "code": "8116006",
+                                       "display": "Phänotypisches Merkmal"
+                                   }
+                                   ]
                     } forKey:@"code"];
-                    
+
                     var codings = [{
                         "system": "http://human-phenotype-ontology.org",
                         "code": tok.code,
                         "display": tok.display
                     }];
-                    
+
                     [subCharItem setObject:{"coding": codings} forKey:@"valueCodeableConcept"];
                     [subCharItem setObject:isExclude forKey:@"exclude"];
-                    
+
                     var itemComb = isExclude ? @"neither-of" : @"all-of";
                     [subCharItem setObject:itemComb forKey:@"combinationMethod"];
-                    
+
                     [subCharacteristics addObject:subCharItem];
                 }
                 [subGroup setObject:subCharacteristics forKey:@"characteristic"];
                 [containedArray addObject:subGroup];
-                
+
                 var refCharacteristic = [CPMutableDictionary dictionary];
                 [refCharacteristic setObject:{"text": "Composite Logical subgroup"} forKey:@"code"];
                 [refCharacteristic setObject:{"reference": "#" + compositeID} forKey:@"valueReference"];
                 [refCharacteristic setObject:isExclude forKey:@"exclude"];
-                
+
                 [characteristics addObject:refCharacteristic];
             }
             else
@@ -2153,19 +2421,19 @@
                 var charItem = [CPMutableDictionary dictionary];
                 [charItem setObject:{
                     "coding": [
-                        {
-                            "system": "http://snomed.info/sct",
-                            "code": "8116006",
-                            "display": "Phänotypisches Merkmal"
-                        }
-                    ]
+                               {
+                                   "system": "http://snomed.info/sct",
+                                   "code": "8116006",
+                                   "display": "Phänotypisches Merkmal"
+                               }
+                               ]
                 } forKey:@"code"];
 
                 [charItem setObject:{"coding": codings} forKey:@"valueCodeableConcept"];
-                
+
                 var isExclude = [[childNode presenceMode] isEqualToString:@"neither-present"];
                 [charItem setObject:isExclude forKey:@"exclude"];
-                
+
                 var combMethod = @"all-of";
                 if ([[childNode presenceMode] isEqualToString:@"any-present"]) {
                     combMethod = @"any-of";
@@ -2219,7 +2487,7 @@
         if (isSubgroup)
         {
             var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
-            
+
             // Structural identification of composite subgroups
             var isComposite = NO;
             if (flattenedSubgroup.id && flattenedSubgroup.id.indexOf("composite-") === 0)
@@ -2246,9 +2514,9 @@
             }
 
             // Collapse logical blocks that are not defined as composite nodes
-            var shouldFlatten = !isComposite && 
-                                (flattenedSubgroup.combinationMethod === group.combinationMethod) && 
-                                ![self _groupContainsExclusions:flattenedSubgroup];
+            var shouldFlatten = !isComposite &&
+            (flattenedSubgroup.combinationMethod === group.combinationMethod) &&
+            ![self _groupContainsExclusions:flattenedSubgroup];
 
             if (shouldFlatten)
             {
@@ -2274,7 +2542,7 @@
 }
 
 // --------------------------------------------------------------------------------
-// Tab 2: HPO Browser Data Source & Search Operations
+// Tab 1 & Tab 2: HPO Browser Data Source & Search Operations
 // --------------------------------------------------------------------------------
 
 - (int)numberOfRowsInTableView:(CPTableView)tableView
@@ -2282,6 +2550,7 @@
     if (tableView === synonymsTableView) return [_synonyms count];
     if (tableView === xrefsTableView) return [_xrefs count];
     if (tableView === downstreamTableView) return [_downstreamTerms count];
+    if (tableView === _crossmatchTableView) return [_crossmatchResults count];
     return 0;
 }
 
@@ -2302,7 +2571,56 @@
             return term.label;
         }
     }
+    if (tableView === _crossmatchTableView) {
+        if (row >= [_crossmatchResults count]) return nil;
+        var item = _crossmatchResults[row];
+        var ident = [tableColumn identifier];
+
+        if (ident === @"status") {
+            if (item.match_type === "inclusion") return "● Match (Inclusion)";
+            if (item.match_type === "exclusion") return "● Match (Exclusion)";
+            return "● Indifferent";
+        }
+        if (ident === @"patient_hpo") return item.patient_hpo;
+        if (ident === @"patient_label") return item.patient_label;
+        if (ident === @"matched_criterion") {
+            if (item.matched_code) {
+                return item.matched_label + " (" + item.matched_code + ")";
+            }
+            return "-";
+        }
+    }
     return nil;
+}
+
+- (void)tableView:(CPTableView)aTableView willDisplayCell:(id)aCell forTableColumn:(CPTableColumn)aTableColumn row:(int)aRow
+{
+    if (aTableView === _crossmatchTableView)
+    {
+        if (aRow >= [_crossmatchResults count]) return;
+        var item = _crossmatchResults[aRow];
+        var ident = [aTableColumn identifier];
+
+        if (ident === @"status")
+        {
+            if (item.match_type === "inclusion")
+            {
+                [aCell setTextColor:[CPColor colorWithRed:0.0 green:0.6 blue:0.0 alpha:1.0]]; // Grün
+            }
+            else if (item.match_type === "exclusion")
+            {
+                [aCell setTextColor:[CPColor colorWithRed:0.8 green:0.0 blue:0.0 alpha:1.0]]; // Rot
+            }
+            else
+            {
+                [aCell setTextColor:[CPColor colorWithRed:0.5 green:0.5 blue:0.5 alpha:1.0]]; // Grau
+            }
+        }
+        else
+        {
+            [aCell setTextColor:[CPColor blackColor]];
+        }
+    }
 }
 
 - (void)tableView:(CPTableView)tableView sortDescriptorsDidChange:(CPArray)oldDescriptors
@@ -2354,7 +2672,7 @@
         [synonymsTableView reloadData];
         [xrefsTableView reloadData];
         [downstreamTableView reloadData];
-        
+
         [_dragSourcePanel setTerm:nil];
         return;
     }
@@ -2434,7 +2752,7 @@
     [CPURLConnection sendAsynchronousRequest:request
                                        queue:[CPOperationQueue mainQueue]
                            completionHandler:function(response, data, error)
-    {
+     {
         if (!error && data) {
             var parsed = [CPJSONSerialization JSONObjectWithData:data options:0 error:nil];
             _downstreamTerms = (parsed && parsed.length) ? parsed : [];
@@ -2474,6 +2792,76 @@
             _xrefs = [];
         }
         [xrefsTableView reloadData];
+    }];
+}
+
+- (void)runPatientMatchingAction:(id)sender
+{
+    [self updateFHIRGroupRepresentation];
+    var rootGroup = [self compileGroupFromFlatNodes:_rootNodes];
+    if (!rootGroup || [_rootNodes count] === 0) {
+        alert("The Logical Eligibility Framework is empty. Please compile or add criteria first.");
+        return;
+    }
+
+    var phenoText = [_phenopacketOutputTextView string];
+    var phenopacket = nil;
+    try {
+        phenopacket = JSON.parse(phenoText);
+    } catch(e) {
+        alert("No valid Phenopacket JSON found. Please run the extraction on the 'Phenopacket / ICD Extractor' tab first.");
+        return;
+    }
+
+    [_matchButton setEnabled:NO];
+    [_matchButton setTitle:@"Matching..."];
+    [_matchStatusLabel setStringValue:@"Running matching on server..."];
+    [_matchStatusLabel setTextColor:[CPColor grayColor]];
+
+    var request = [CPURLRequest requestWithURL:"/DBB/match_eligibility"];
+    [request setHTTPMethod:@"POST"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    var jsGroup = [rootGroup JSObject];
+    var payload = {
+        "group": jsGroup,
+        "phenopacket": phenopacket
+    };
+    var postData = [CPString stringWithString:JSON.stringify(payload)];
+    [request setHTTPBody:postData];
+
+    [CPURLConnection sendAsynchronousRequest:request
+                                       queue:[CPOperationQueue mainQueue]
+                           completionHandler:function(response, data, error)
+     {
+        [_matchButton setEnabled:YES];
+        [_matchButton setTitle:@"Run Patient Matching"];
+
+        if (!error && data) {
+            try {
+                var parsedData = JSON.parse(data);
+
+                var isEligible = parsedData.eligible === 1;
+                if (isEligible) {
+                    [_matchStatusLabel setStringValue:@"PATIENT ELIGIBLE (Match Succeeded)"];
+                    [_matchStatusLabel setTextColor:[CPColor colorWithRed:0.0 green:0.6 blue:0.0 alpha:1.0]];
+                } else {
+                    [_matchStatusLabel setStringValue:@"PATIENT INELIGIBLE (Criteria Not Satisfied)"];
+                    [_matchStatusLabel setTextColor:[CPColor colorWithRed:0.8 green:0.0 blue:0.0 alpha:1.0]];
+                }
+
+                _crossmatchResults = parsedData.phenotype_matches || [];
+                [_crossmatchTableView reloadData];
+
+            } catch (e) {
+                alert("Error parsing matching response: " + e.message);
+            }
+        } else {
+            var errorMsg = (error) ? [error localizedDescription] : @"Could not contact the database matching services.";
+            [_matchStatusLabel setStringValue:@"Matching failed."];
+            [_matchStatusLabel setTextColor:[CPColor colorWithRed:0.8 green:0.0 blue:0.0 alpha:1.0]];
+            alert("Crossmatch Error:\n" + errorMsg);
+        }
     }];
 }
 
@@ -2519,7 +2907,7 @@
         {
             [_searchStatusLabel setStringValue:@"Error"];
         }
-     }];
+    }];
 }
 
 - (void)resolvePath:(CPArray)nodeIds currentIndex:(int)index currentModels:(CPArray)models baseIndexPath:(CPIndexPath)indexPath completion:(Function)callback
@@ -2773,9 +3161,36 @@
     [_searchStatusLabel setAlphaValue:val];
 }
 
+- (void)startExtractPulsatingAnimation
+{
+    [_extractStatusLabel setWantsLayer:YES];
+    var layer = [_extractStatusLabel layer];
+    [layer setDelegate:self];
+
+    var pulseAnimation = [CABasicAnimation animationWithKeyPath:@"extractAlphaValue"];
+    pulseAnimation._animationID = "extractPulse";
+    [pulseAnimation setDelegate:self];
+    [pulseAnimation setFromValue:1.0];
+    [pulseAnimation setToValue:0.2];
+    [pulseAnimation setDuration:0.6];
+    [layer addAnimation:pulseAnimation forKey:@"extractAlphaValue"];
+}
+
+- (void)stopExtractPulsatingAnimation
+{
+    [[_extractStatusLabel layer] removeAnimationForKey:@"extractAlphaValue"];
+    [_extractStatusLabel setAlphaValue:1.0];
+}
+
+- (void)setExtractAlphaValue:(float)val
+{
+    [_extractStatusLabel setAlphaValue:val];
+}
+
 - (void)animationDidStop:(CAAnimation)anim finished:(BOOL)finished
 {
     if (!finished) return;
+
     if (anim._animationID === @"searchPulse") {
         var currentOpacity = [_searchStatusLabel alphaValue];
         var fromVal = (currentOpacity < 0.5) ? 0.2 : 1.0;
@@ -2789,6 +3204,20 @@
         [pulseAnimation setToValue:toVal];
         [pulseAnimation setDuration:0.6];
         [layer addAnimation:pulseAnimation forKey:@"searchAlphaValue"];
+    }
+    else if (anim._animationID === @"extractPulse") {
+        var currentOpacity = [_extractStatusLabel alphaValue];
+        var fromVal = (currentOpacity < 0.5) ? 0.2 : 1.0;
+        var toVal   = (currentOpacity < 0.5) ? 1.0 : 0.2;
+
+        var layer = [_extractStatusLabel layer];
+        var pulseAnimation = [CABasicAnimation animationWithKeyPath:@"extractAlphaValue"];
+        pulseAnimation._animationID = "extractPulse";
+        [pulseAnimation setDelegate:self];
+        [pulseAnimation setFromValue:fromVal];
+        [pulseAnimation setToValue:toVal];
+        [pulseAnimation setDuration:0.6];
+        [layer addAnimation:pulseAnimation forKey:@"extractAlphaValue"];
     }
 }
 

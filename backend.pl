@@ -2619,6 +2619,202 @@ get '/DBB/hpo/search/:query' => sub {
     $self->render(json => $results);
 };
 
+# =========================================================
+# HPO SUBCLASS MATCHING & EXTRACTION LOGIC
+# =========================================================
+
+# Hilfsfunktion zur internen Konvertierung "HP:0001250" -> 1250
+sub _hpo_to_int {
+    my $hpo_str = shift;
+    return undef unless $hpo_str;
+    if ($hpo_str =~ /^hp:0*(\d+)$/i) {
+        return int($1);
+    }
+    return undef;
+}
+
+# Helper: Prüft rekursiv in der DB, ob child_hpo eine Subklasse von parent_hpo ist
+helper is_subclass_of => sub {
+    my ($self, $child_hpo_str, $parent_hpo_str) = @_;
+
+    my $child_id  = _hpo_to_int($child_hpo_str);
+    my $parent_id = _hpo_to_int($parent_hpo_str);
+
+    return 0 unless defined $child_id && defined $parent_id;
+    return 1 if $child_id == $parent_id; # Identische IDs sind immer ein Match
+
+    # Rekursive CTE-Suche im HPO-DAG über die 'isas'-Tabelle
+    my $sql = q{
+        WITH RECURSIVE descendants AS (
+        SELECT idchild FROM public.isas WHERE idparent = ?
+        UNION
+        SELECT i.idchild FROM public.isas i
+        JOIN descendants d ON i.idparent = d.idchild
+        )
+        SELECT 1 FROM descendants WHERE idchild = ? LIMIT 1
+    };
+
+    my $sth = $self->db->prepare($sql);
+    $sth->execute($parent_id, $child_id);
+    my ($is_descendant) = $sth->fetchrow_array();
+
+    return $is_descendant ? 1 : 0;
+};
+
+# Rekursive Hilfsfunktion zur Flachlegung aller Studienkriterien aus der FHIR-Group
+sub extract_all_criteria {
+    my ($group, $contained_map, $accumulated_criteria) = @_;
+    $accumulated_criteria //= [];
+    return $accumulated_criteria unless ref $group eq 'HASH';
+
+    my $characteristics = $group->{characteristic} // [];
+    foreach my $char (@$characteristics) {
+        if (my $ref = $char->{valueReference}{reference}) {
+            $ref =~ s/^#//;
+            my $sub_group = $contained_map->{$ref};
+            if ($sub_group) {
+                extract_all_criteria($sub_group, $contained_map, $accumulated_criteria);
+            }
+        }
+        elsif (my $crit_code = $char->{valueCodeableConcept}{coding}[0]{code}) {
+            push @$accumulated_criteria, {
+                code    => $crit_code,
+                display => $char->{valueCodeableConcept}{coding}[0]{display} // $crit_code,
+                exclude => $char->{exclude} ? 1 : 0
+            };
+        }
+    }
+    return $accumulated_criteria;
+}
+
+# Rekursive Evaluierungsfunktion für die FHIR-Logik
+sub evaluate_group_logic {
+    my ($c, $group, $contained_map, $phenopacket) = @_;
+
+    my $comb_method     = $group->{combinationMethod} // 'all-of';
+    my $characteristics = $group->{characteristic} // [];
+
+    return 1 if @$characteristics == 0; # Leere Kriterien-Gruppen gelten als erfüllt
+
+    my @results;
+
+    foreach my $char (@$characteristics) {
+        my $char_result = 0;
+
+        # FALL A: Kriterium verweist auf eine verschachtelte Sub-Gruppe
+        if (my $ref = $char->{valueReference}{reference}) {
+            $ref =~ s/^#//;
+            my $sub_group = $contained_map->{$ref};
+            if ($sub_group) {
+                $char_result = evaluate_group_logic($c, $sub_group, $contained_map, $phenopacket);
+            } else {
+                $c->app->log->warn("Sub-Gruppe mit ID #$ref nicht gefunden.");
+                $char_result = 0;
+            }
+        }
+        # FALL B: Direktes HPO-Merkmal
+        elsif (my $crit_hpo = $char->{valueCodeableConcept}{coding}[0]{code}) {
+            my $patient_features = $phenopacket->{phenotypicFeatures} // [];
+            my $has_phenotype    = 0;
+
+            foreach my $feat (@$patient_features) {
+                next if $feat->{excluded};
+
+                my $patient_hpo = $feat->{type}{id};
+                if ($c->is_subclass_of($patient_hpo, $crit_hpo)) {
+                    $has_phenotype = 1;
+                    last;
+                }
+            }
+
+            if ($char->{exclude}) {
+                $char_result = $has_phenotype ? 0 : 1;
+            } else {
+                $char_result = $has_phenotype ? 1 : 0;
+            }
+        }
+        else {
+            $char_result = 1;
+        }
+
+        push @results, $char_result;
+    }
+
+    if ($comb_method eq 'all-of') {
+        return (grep { $_ == 0 } @results) ? 0 : 1;
+    }
+    elsif ($comb_method eq 'any-of') {
+        return (grep { $_ == 1 } @results) ? 1 : 0;
+    }
+    else {
+        $c->app->log->warn("Unbekannte combinationMethod: $comb_method. Nutze Fallback 'all-of'.");
+        return (grep { $_ == 0 } @results) ? 0 : 1;
+    }
+}
+
+# =========================================================
+# ROUTE: Match Patient (Phenopacket) against Eligibility (FHIR Group)
+# =========================================================
+post '/DBB/match_eligibility' => sub {
+    my $c = shift;
+
+    my $payload     = $c->req->json;
+    my $group       = $payload->{group};
+    my $phenopacket = $payload->{phenopacket};
+
+    unless ($group && $phenopacket) {
+        return $c->render(
+        json   => { error => "Missing 'group' or 'phenopacket' in request body" },
+        status => 400
+        );
+    }
+
+    my $contained_arr = $group->{contained} // [];
+    my %contained_map = map { $_->{id} => $_ } @$contained_arr;
+
+    # 1. Globale Auswertung der Eignung starten
+    my $is_eligible = evaluate_group_logic($c, $group, \%contained_map, $phenopacket);
+
+    # 2. Detaillierte Prüfung auf Ebene der einzelnen Patienten-Phänotypen
+    my $criteria_list = extract_all_criteria($group, \%contained_map);
+    my @phenotype_matches;
+    my $patient_features = $phenopacket->{phenotypicFeatures} // [];
+
+    foreach my $feat (@$patient_features) {
+        next if $feat->{excluded};
+
+        my $patient_hpo   = $feat->{type}{id};
+        my $patient_label = $feat->{type}{label} // $patient_hpo;
+
+        my $matched_criterion = undef;
+        my $match_type        = "none"; # none, inclusion, exclusion
+
+        foreach my $crit (@$criteria_list) {
+            if ($c->is_subclass_of($patient_hpo, $crit->{code})) {
+                $matched_criterion = $crit;
+                $match_type        = $crit->{exclude} ? "exclusion" : "inclusion";
+                last; # Ersten passenden Treffer sichern
+            }
+        }
+
+        push @phenotype_matches, {
+            patient_hpo   => $patient_hpo,
+            patient_label => $patient_label,
+            match_type    => $match_type,
+            matched_code  => $matched_criterion ? $matched_criterion->{code} : undef,
+            matched_label => $matched_criterion ? $matched_criterion->{display} : undef,
+        };
+    }
+
+    $c->render(json => {
+        patient_id        => $phenopacket->{subject}{id} // "anonymous-patient",
+        group_id          => $group->{id} // "unnamed-group",
+        eligible          => $is_eligible ? 1 : 0,
+        phenotype_matches => \@phenotype_matches,
+        timestamp         => strftime("%Y-%m-%dT%H:%M:%SZ", gmtime)
+    });
+};
+
 helper fetchFromTable => sub {
     my ($self, $table, $sessionid, $where)=@_;
     my $sql = SQL::Abstract::More->new;
