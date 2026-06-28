@@ -14,12 +14,10 @@
     var keys = [self allKeys];
     for (var i = 0; i < [keys count]; i++)
     {
-        var key = keys[i];
+        var key = [keys objectAtIndex:i];
         var val = [self objectForKey:key];
 
-        if ([val respondsToSelector:@selector(JSObject)])
-            obj[key] = [val JSObject];
-        else if ([val isKindOfClass:[CPArray class]])
+        if (val && val.isa && [val respondsToSelector:@selector(JSObject)])
             obj[key] = [val JSObject];
         else
             obj[key] = val;
@@ -35,15 +33,123 @@
     for (var i = 0; i < [self count]; i++)
     {
         var val = [self objectAtIndex:i];
-        if ([val respondsToSelector:@selector(JSObject)])
-            [arr addObject:[val JSObject]];
+        if (val && val.isa && [val respondsToSelector:@selector(JSObject)])
+            arr.push([val JSObject]);
         else
-            [arr addObject:val];
+            arr.push(val);
     }
     return arr;
 }
 @end
 
+// --------------------------------------------------------------------------------
+// Category for Custom Token Customization (HPO Code + Label Styling via DOM)
+// --------------------------------------------------------------------------------
+
+@implementation _CPTokenFieldToken (HPOCustomization)
+
+- (CGSize)_minimumFrameSize
+{
+    var minSize = [self currentValueForThemeAttribute:@"min-size"],
+        contentInset = [self currentValueForThemeAttribute:@"content-inset"];
+
+    var size = CGSizeMake(0, 18); // Compact 18px height to fit cleanly in the 28px Rule Editor row
+    var rep = [self representedObject];
+    if (rep && rep.code)
+    {
+        var codeWidth = [rep.code sizeWithFont:[CPFont boldSystemFontOfSize:8.0]].width + 10;
+        
+        var displayText = rep.display || @"";
+        if (displayText.length > 10) {
+            displayText = [displayText substringToIndex:10] + @"...";
+        }
+        var textWidth = [displayText sizeWithFont:[CPFont systemFontOfSize:9.0]].width + 6;
+        size.width = codeWidth + textWidth + 24; // Sleek and compact horizontal spacing
+    }
+    else
+    {
+        size.width = MAX(minSize.width, [([self stringValue] || @" ") sizeWithFont:[self font]].width + contentInset.left + contentInset.right);
+    }
+    return size;
+}
+
+- (void)layoutSubviews
+{
+    [super layoutSubviews];
+    
+    // Completely silence and transparentize the default text element natively
+    if (self._DOMTextElement) {
+        self._DOMTextElement.innerHTML = "";
+        self._DOMTextElement.style.display = "none";
+        self._DOMTextElement.style.visibility = "hidden";
+        self._DOMTextElement.style.color = "transparent";
+    }
+    
+    var rep = [self representedObject];
+    if (rep && rep.code)
+    {
+        // Use raw CPViews instead of CPTextFields to completely bypass Cappuccino's
+        // text drawing pipeline and prevent automatic font/color overrides.
+        var codeLabel = [self viewWithTag:101];
+        if (!codeLabel)
+        {
+            codeLabel = [[CPView alloc] initWithFrame:CGRectMakeZero()];
+            [codeLabel setTag:101];
+            [self addSubview:codeLabel];
+        }
+        
+        var textLabel = [self viewWithTag:102];
+        if (!textLabel)
+        {
+            textLabel = [[CPView alloc] initWithFrame:CGRectMakeZero()];
+            [textLabel setTag:102];
+            [self addSubview:textLabel];
+        }
+        
+        // Render text and apply robust centering and sizing via pure CSS
+        if (codeLabel._DOMElement)
+        {
+            codeLabel._DOMElement.innerHTML = rep.code;
+            
+            var codeStyle = codeLabel._DOMElement.style;
+            codeStyle.backgroundColor = "rgb(0, 128, 180)";
+            codeStyle.borderRadius = "3px";
+            codeStyle.color = "white";
+            codeStyle.lineHeight = "12px";
+            codeStyle.textAlign = "center";
+            codeStyle.fontSize = "8px";
+            codeStyle.fontWeight = "bold";
+            codeStyle.fontFamily = "sans-serif";
+        }
+
+        var displayText = rep.display || @"";
+        if (displayText.length > 10) {
+            displayText = [displayText substringToIndex:10] + @"...";
+        }
+
+        if (textLabel._DOMElement)
+        {
+            textLabel._DOMElement.innerHTML = displayText;
+            
+            var textStyle = textLabel._DOMElement.style;
+            textStyle.color = "rgb(100, 100, 100)";
+            textStyle.lineHeight = "12px";
+            textStyle.textAlign = "center";
+            textStyle.fontSize = "9px";
+            textStyle.fontFamily = "sans-serif";
+        }
+        
+        var bounds = [self bounds];
+        var codeWidth = [rep.code sizeWithFont:[CPFont boldSystemFontOfSize:8.0]].width + 10;
+        var textWidth = [displayText sizeWithFont:[CPFont systemFontOfSize:9.0]].width + 6;
+        
+        // Position badge and label inside the 18px high token (perfect vertical centering at y=3)
+        [codeLabel setFrame:CGRectMake(4, 3, codeWidth, 12)];
+        [textLabel setFrame:CGRectMake(codeWidth + 8, 3, textWidth, 12)];
+    }
+}
+
+@end
 
 // --------------------------------------------------------------------------------
 // FHIRCriteriaNode (Structured MVC Row Model)
@@ -61,7 +167,8 @@
     CPString            _combinationMethod;
     int                 _indentation       @accessors(property=indentation);
 
-    CPTextField         _textField         @accessors(property=textField);
+    CPTokenField        _tokenField        @accessors(property=tokenField);
+    CPArray             _hpoTokens         @accessors(property=hpoTokens);
 }
 
 - (id)init
@@ -77,6 +184,7 @@
         _exclude = NO;
         _combinationMethod = @"all-of";
         _indentation = 0;
+        _hpoTokens = [];
 
         // Force initial population of standard inclusion metadata
         [self updateCriteriaAndDisplayValues];
@@ -268,7 +376,7 @@
     {
         if (criterion == nil) return 1; // "Phenotypic Feature"
         if (criterion == @"phenotype") return 2; // "Inclusion" vs "Exclusion"
-        if (criterion == @"inclusion" || criterion == @"exclusion") return 1; // text input placeholder
+        if (criterion == @"inclusion" || criterion == @"exclusion") return 1; // token field input placeholder
     }
     return 0;
 }
@@ -310,30 +418,37 @@
         var node = [_controller nodeAtRowIndex:row];
         if (node)
         {
-            var cachedField = [node textField];
+            var cachedField = [node tokenField];
             if (cachedField)
             {
                 return cachedField;
             }
 
-            var inputField = [[CPTextField alloc] initWithFrame:CGRectMake(0, 0, 160, 24)];
-            [inputField setEditable:YES];
-            [inputField setBezeled:YES];
-            [inputField setBackgroundColor:[CPColor whiteColor]];
-            [inputField setPlaceholderString:@"e.g., Corneal erosion"];
-            [inputField setStringValue:[node symptomText]];
-            [inputField setTarget:_controller];
-            [inputField setAction:@selector(ruleEditorDidChange:)];
+            var tokenField = [[CPTokenField alloc] initWithFrame:CGRectMake(0, 0, 320, 24)];
+            [tokenField setEditable:YES];
+            [tokenField setBezeled:YES];
+            [tokenField setBackgroundColor:[CPColor whiteColor]];
+            [tokenField setPlaceholderString:@"e.g., Corneal erosion"];
+            
+            // CRITICAL FIX: Set delegate BEFORE populating object value to prevent "[object Object]" fallback
+            [tokenField setDelegate:_controller];
+            
+            // Populate tokens
+            var hpoTokens = [node hpoTokens] || [];
+            [tokenField setObjectValue:hpoTokens];
+            
+            [tokenField setTarget:_controller];
+            [tokenField setAction:@selector(ruleEditorDidChange:)];
 
-            inputField.node = node;
+            tokenField.node = node;
 
             [[CPNotificationCenter defaultCenter] addObserver:_controller
                                                      selector:@selector(ruleEditorDidChange:)
                                                          name:CPControlTextDidChangeNotification
-                                                       object:inputField];
+                                                       object:tokenField];
 
-            [node setTextField:inputField];
-            return inputField;
+            [node setTokenField:tokenField];
+            return tokenField;
         }
     }
 
@@ -445,6 +560,34 @@
 
     [theWindow orderFront:self];
     [self fetchRoots];
+}
+
+// --------------------------------------------------------------------------------
+// CPTokenFieldDelegate Implementations (Converting strings to rich tokens)
+// --------------------------------------------------------------------------------
+
+- (CPString)tokenField:(CPTokenField)tokenField displayStringForRepresentedObject:(id)representedObject
+{
+    return "";
+}
+
+- (id)tokenField:(CPTokenField)tokenField representedObjectForEditingString:(CPString)editingString
+{
+    var cleanString = [editingString stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([cleanString hasPrefix:@"HP:"])
+    {
+        var parts = [cleanString componentsSeparatedByString:@" "];
+        var code = parts[0];
+        [parts removeObjectAtIndex:0];
+        var display = [parts componentsJoinedByString:@" "] || @"Manual Entry";
+        return { "code": code, "display": display };
+    }
+    return { "code": @"HP:0000118", "display": cleanString };
+}
+
+- (CPArray)tokenField:(CPTokenField)tokenField completionsForSubstring:(CPString)substring indexOfToken:(CPInteger)tokenIndex indexOfSelectedItem:(CPInteger)selectedIndex
+{
+    return [];
 }
 
 // --------------------------------------------------------------------------------
@@ -860,7 +1003,7 @@
 - (id)textFieldForRow:(int)row
 {
     var node = [self nodeAtRowIndex:row];
-    return node ? [node textField] : nil;
+    return node ? [node tokenField] : nil;
 }
 
 // --------------------------------------------------------------------------------
@@ -923,7 +1066,6 @@
 
     [self insertNode:newNode];
 
-    // Automatically append an initial simple row inside the new group
     var childNode = [[FHIRCriteriaNode alloc] init];
     [childNode setRowType:CPRuleEditorRowTypeSimple];
     [childNode updateCriteriaAndDisplayValues];
@@ -952,9 +1094,14 @@
         control = [sender object];
     }
 
-    if ([control isKindOfClass:[CPTextField class]] && control.node)
+    if ([control isKindOfClass:[CPTokenField class]] && control.node)
     {
-        [control.node setSymptomText:[control stringValue]];
+        var tokens = [control objectValue] || [];
+        [control.node setHpoTokens:tokens];
+        if (tokens.length > 0)
+        {
+            [control.node setSymptomText:tokens[0].display];
+        }
     }
 
     [self updateFHIRGroupRepresentation];
@@ -1003,7 +1150,6 @@
                 var parsedData = JSON.parse(data);
                 console.log("DEBUG [Backend Response] raw phenopacket: ", parsedData);
 
-                // Normalise hierarchy payload formats if custom fields exist
                 if (parsedData && (parsedData.characteristics || parsedData.combinationMethod)) {
                     parsedData = [self convertCustomJSONToFHIRGroup:parsedData];
                 }
@@ -1121,7 +1267,6 @@
 {
     if ([flatNodes count] === 0) return [CPMutableDictionary dictionary];
 
-    // Reconstruct standard hierarchical structure from flat elements
     var pseudoRoot = [[FHIRCriteriaNode alloc] init];
     [pseudoRoot setRowType:CPRuleEditorRowTypeCompound];
     [pseudoRoot setCombinationMethod:@"all-of"];
@@ -1204,12 +1349,40 @@
         }
         else
         {
-            var rawText = [childNode symptomText] || @"";
-            var clinicalTerm = [rawText stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
-            var hpoTermName = [clinicalTerm isEqualToString:@""] ? @"UNDEFINED" : clinicalTerm;
+            var tokenField = [childNode tokenField];
+            var tokens = tokenField ? [tokenField objectValue] : [];
+            var codings = [];
 
-            var formattedTerm = hpoTermName.toUpperCase().replace(/\s+/g, '_');
-            var hpoCodePlaceholder = "[HPO_CODE_FOR_" + formattedTerm + "]";
+            if (tokens.length > 0)
+            {
+                for (var k = 0; k < tokens.length; k++)
+                {
+                    var tok = tokens[k];
+                    if (tok && tok.code)
+                    {
+                        codings.push({
+                            "system": "http://human-phenotype-ontology.org",
+                            "code": tok.code,
+                            "display": tok.display
+                        });
+                    }
+                }
+            }
+            else
+            {
+                var rawText = [childNode symptomText] || @"";
+                var clinicalTerm = [rawText stringByTrimmingCharactersInSet:[CPCharacterSet whitespaceAndNewlineCharacterSet]];
+                var hpoTermName = [clinicalTerm isEqualToString:@""] ? @"UNDEFINED" : clinicalTerm;
+
+                var formattedTerm = hpoTermName.toUpperCase().replace(/\s+/g, '_');
+                var hpoCodePlaceholder = "[HPO_CODE_FOR_" + formattedTerm + "]";
+
+                codings.push({
+                    "system": "http://human-phenotype-ontology.org",
+                    "code": hpoCodePlaceholder,
+                    "display": hpoTermName
+                });
+            }
 
             var charItem = [CPMutableDictionary dictionary];
 
@@ -1223,16 +1396,7 @@
                 ]
             } forKey:@"code"];
 
-            [charItem setObject:@{
-                @"coding": [
-                    @{
-                        @"system": @"http://human-phenotype-ontology.org",
-                        @"code": hpoCodePlaceholder,
-                        @"display": hpoTermName
-                    }
-                ]
-            } forKey:@"valueCodeableConcept"];
-
+            [charItem setObject:@{ @"coding": codings } forKey:@"valueCodeableConcept"];
             [charItem setObject:[childNode exclude] forKey:@"exclude"];
 
             [characteristics addObject:charItem];
@@ -1269,24 +1433,28 @@
             [childNode setRowType:CPRuleEditorRowTypeSimple];
             [childNode setExclude:charItem.exclude ? YES : NO];
 
-            var rawText = @"";
+            var hpoTokens = [];
             var valCodeableConcept = charItem.valueCodeableConcept;
-            if (valCodeableConcept && valCodeableConcept.coding && valCodeableConcept.coding.length > 0)
+            if (valCodeableConcept && valCodeableConcept.coding)
             {
-                rawText = valCodeableConcept.coding[0].display || @"";
+                var codings = valCodeableConcept.coding;
+                for (var k = 0; k < codings.length; k++)
+                {
+                    var coding = codings[k];
+                    hpoTokens.push({
+                        "code": coding.code || "HP:0000118",
+                        "display": coding.display || "Phenotypic feature"
+                    });
+                }
             }
-            [childNode setSymptomText:rawText];
-            
-            // Strategic frontend debugging output (corrected to Objective-J bracket syntax)
-            console.log("DEBUG [Frontend Parser] Index " + i + 
-                        ": text='" + rawText + 
-                        "' | exclude=" + [childNode exclude] + 
-                        " (raw JSON source exclude=" + charItem.exclude + ")");
 
-            // Explicitly force synchronization of criteria and display values 
-            // after populating imported properties
+            [childNode setHpoTokens:hpoTokens];
+            if (hpoTokens.length > 0)
+            {
+                [childNode setSymptomText:hpoTokens[0].display];
+            }
+
             [childNode updateCriteriaAndDisplayValues];
-            
             [[node subrows] addObject:childNode];
         }
     }
@@ -1297,19 +1465,15 @@
 
 - (BOOL)_groupContainsExclusions:(id)group
 {
-    if (!group)
-        return NO;
+    if (!group) return NO;
 
     var characteristics = group.characteristic || [];
     for (var i = 0; i < characteristics.length; i++)
     {
         var charItem = characteristics[i];
-        
-        // Check if the individual characteristic is an exclusion
         if (charItem.exclude === true)
             return YES;
 
-        // Recursively check nested subgroups
         var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
         if (isSubgroup)
         {
@@ -1335,9 +1499,6 @@
         if (isSubgroup)
         {
             var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
-
-            // Only flatten if combination methods match AND the subgroup contains no exclusions.
-            // This preserves the visual isolation of the exclusion block.
             var shouldFlatten = (flattenedSubgroup.combinationMethod === group.combinationMethod) && 
                                 ![self _groupContainsExclusions:flattenedSubgroup];
 
@@ -1370,8 +1531,6 @@
     try
     {
         _isImportingJSON = YES;
-
-        // Strategic debug log of the backend response prior to rendering
         console.log("DEBUG [Frontend Import] Incoming rootGroup payload: ", rootGroup);
 
         var flattenedGroup = [self _flattenFHIRGroup:rootGroup];
@@ -1396,7 +1555,6 @@
         }
 
         [self setRootNodes:flatList];
-
         [self performSelector:@selector(_enableImporting) withObject:nil afterDelay:0];
     }
     catch (e)
