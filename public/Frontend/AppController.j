@@ -23,7 +23,12 @@
 
     var termId = [node termId];
     var formattedId = "HP:" + [CPString stringWithFormat:"%07d", termId + 0];
-    var dict = { "code": formattedId, "display": [node name] };
+    
+    // Safely wrap in CPDictionary to avoid plist serialization exceptions
+    var dict = [CPDictionary dictionaryWithObjectsAndKeys:
+                formattedId, @"code",
+                [node name], @"display"
+               ];
 
     var pboard = [CPPasteboard pasteboardWithName:CPDragPboard];
     [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
@@ -198,6 +203,113 @@
 @end
 
 // --------------------------------------------------------------------------------
+// HPODragSourceView (Highly Visible, Dedicated Drag Station)
+// --------------------------------------------------------------------------------
+
+@implementation HPODragSourceView : CPView
+{
+    CPTextField _label;
+    CPTextField _badge;
+    id _representedTerm;
+}
+
+- (id)initWithFrame:(CGRect)aFrame
+{
+    self = [super initWithFrame:aFrame];
+    if (self) {
+        [self setBackgroundColor:[CPColor colorWithRed:0.96 green:0.98 blue:1.0 alpha:1.0]];
+        
+        // Apply dashed border styling
+        self._DOMElement.style.border = "1.5px dashed #0080B4";
+        self._DOMElement.style.borderRadius = "5px";
+        self._DOMElement.style.cursor = "default";
+
+
+        _badge = [[CPTextField alloc] initWithFrame:CGRectMake(2, 6, 80, 20)];
+        [_badge setFont:[CPFont boldSystemFontOfSize:10.0]];
+        [_badge setTextColor:[CPColor whiteColor]];
+        [_badge setAlignment:CPCenterTextAlignment];
+        [_badge setStringValue:@"HP:XXXXXXX"];
+        _badge._DOMElement.style.backgroundColor = "#888888";
+        _badge._DOMElement.style.borderRadius = "3px";
+        _badge._DOMElement.style.lineHeight = "20px";
+        [self addSubview:_badge];
+
+        _label = [[CPTextField alloc] initWithFrame:CGRectMake(280, 8, aFrame.size.width - 290, 16)];
+        [_label setFont:[CPFont systemFontOfSize:11.0]];
+        [_label setTextColor:[CPColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:1.0]];
+        [_label setStringValue:@"Select any HPO node below to begin dragging..."];
+        [self addSubview:_label];
+    }
+    return self;
+}
+
+- (void)setTerm:(id)aTerm
+{
+    _representedTerm = aTerm;
+    if (_representedTerm) {
+        [_badge setStringValue:_representedTerm.code];
+        [_label setStringValue:_representedTerm.display];
+        [_label setTextColor:[CPColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0]];
+        _badge._DOMElement.style.backgroundColor = "#0080B4";
+        self._DOMElement.style.backgroundColor = [CPColor colorWithRed:0.9 green:0.95 blue:1.0 alpha:1.0];
+        self._DOMElement.style.border = "1.5px dashed #0080B4";
+        self._DOMElement.style.cursor = "grab";
+    } else {
+        [_badge setStringValue:@"HP:XXXXXXX"];
+        [_label setStringValue:@"Select any HPO node below to begin dragging..."];
+        [_label setTextColor:[CPColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:1.0]];
+        _badge._DOMElement.style.backgroundColor = "#888888";
+        self._DOMElement.style.backgroundColor = [CPColor colorWithRed:0.96 green:0.98 blue:1.0 alpha:1.0];
+        self._DOMElement.style.border = "1.5px dashed #cccccc";
+        self._DOMElement.style.cursor = "default";
+    }
+}
+
+- (id)term
+{
+    return _representedTerm;
+}
+
+- (void)mouseDragged:(CPEvent)anEvent
+{
+    if (!_representedTerm) return;
+
+    var pboard = [CPPasteboard pasteboardWithName:CPDragPboard];
+    [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
+    
+    // Avoid raw object plist serialization errors by using a CPDictionary
+    var dict = [CPDictionary dictionaryWithObjectsAndKeys:
+                _representedTerm.code, @"code",
+                _representedTerm.display, @"display"
+               ];
+    
+    [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
+    [pboard setString:_representedTerm.code forType:CPStringPboardType];
+
+    // High contrast drag visual badge
+    var dragView = [[CPView alloc] initWithFrame:CGRectMake(0, 0, 160, 24)];
+    [dragView setBackgroundColor:[CPColor colorWithRed:0.0 green:0.5 blue:0.7 alpha:0.9]];
+    dragView._DOMElement.style.borderRadius = "4px";
+
+    var dragLabel = [[CPTextField alloc] initWithFrame:CGRectMake(8, 4, 144, 16)];
+    [dragLabel setStringValue:_representedTerm.display];
+    [dragLabel setTextColor:[CPColor whiteColor]];
+    [dragLabel setFont:[CPFont boldSystemFontOfSize:10.0]];
+    [dragView addSubview:dragLabel];
+
+    [self dragView:dragView
+                at:CGPointMakeZero()
+            offset:CGSizeMakeZero()
+             event:anEvent
+        pasteboard:pboard
+            source:self
+         slideBack:YES];
+}
+
+@end
+
+// --------------------------------------------------------------------------------
 // HPOTokenField Subclass (With Native Drag-and-Drop Drop Target Implementation)
 // --------------------------------------------------------------------------------
 
@@ -214,7 +326,7 @@
 - (CPDragOperation)draggingEntered:(id <CPDraggingInfo>)sender
 {
     var pboard = [sender draggingPasteboard];
-    if ([[pboard types] containsObject:@"HPOTermPboardType"])
+    if ([[pboard types] containsObject:@"HPOTermPboardType"] || [[pboard types] containsObject:CPStringPboardType])
     {
         return CPDragOperationCopy;
     }
@@ -224,7 +336,7 @@
 - (CPDragOperation)draggingUpdated:(id <CPDraggingInfo>)sender
 {
     var pboard = [sender draggingPasteboard];
-    if ([[pboard types] containsObject:@"HPOTermPboardType"])
+    if ([[pboard types] containsObject:@"HPOTermPboardType"] || [[pboard types] containsObject:CPStringPboardType])
     {
         return CPDragOperationCopy;
     }
@@ -234,16 +346,47 @@
 - (BOOL)performDragOperation:(id <CPDraggingInfo>)sender
 {
     var pboard = [sender draggingPasteboard];
+    var dict = nil;
+
     if ([[pboard types] containsObject:@"HPOTermPboardType"])
     {
-        var dict = [pboard propertyListForType:@"HPOTermPboardType"];
-        if (dict)
+        dict = [pboard propertyListForType:@"HPOTermPboardType"];
+    }
+
+    if (!dict && [[pboard types] containsObject:CPStringPboardType])
+    {
+        var str = [pboard stringForType:CPStringPboardType];
+        if (str && [str hasPrefix:@"HP:"])
+        {
+            dict = { "code": str, "display": str };
+        }
+    }
+
+    if (dict)
+    {
+        var code = nil;
+        var display = nil;
+
+        // Securely handle serialized CPDictionary properties as well as plain objects
+        if ([dict respondsToSelector:@selector(objectForKey:)])
+        {
+            code = [dict objectForKey:@"code"];
+            display = [dict objectForKey:@"display"];
+        }
+        else
+        {
+            code = dict.code;
+            display = dict.display;
+        }
+
+        if (code)
         {
             var tokens = [self objectValue] || [];
             var exists = NO;
             for (var i = 0; i < tokens.length; i++)
             {
-                if (tokens[i].code === dict.code)
+                var existingCode = tokens[i].code;
+                if (existingCode === code)
                 {
                     exists = YES;
                     break;
@@ -252,7 +395,7 @@
             if (!exists)
             {
                 var mutableTokens = [CPMutableArray arrayWithArray:tokens];
-                [mutableTokens addObject:dict];
+                [mutableTokens addObject:{ "code": code, "display": display }];
                 [self setObjectValue:mutableTokens];
                 
                 if (_editorController)
@@ -367,11 +510,6 @@
         _combinationMethod = method;
         [self updateCriteriaAndDisplayValues];
     }
-}
-
-- (CPString)combinationMethod
-{
-    return _combinationMethod;
 }
 
 - (void)setCriteria:(CPArray)criteria
@@ -675,6 +813,8 @@
     CPPopover            _exportPopover;
     CPTextView           _exportTextView;
 
+    HPODragSourceView    _dragSourcePanel;
+
     CPArray              _allRoots;
     CPArray              _synonyms;
     CPArray              _xrefs;
@@ -749,7 +889,12 @@
     var termId = [node termId];
     var formattedId = "HP:" + [CPString stringWithFormat:"%07d", termId + 0];
     
-    var dict = { "code": formattedId, "display": [node name] };
+    // Package securely as CPDictionary to stop deserializer exceptions
+    var dict = [CPDictionary dictionaryWithObjectsAndKeys:
+                formattedId, @"code",
+                [node name], @"display"
+               ];
+               
     [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
     [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
     [pboard setString:formattedId forType:CPStringPboardType];
@@ -766,7 +911,12 @@
         var term = _downstreamTerms[clickedRow];
         var formattedId = "HP:" + [CPString stringWithFormat:"%07d", term.id + 0];
         
-        var dict = { "code": formattedId, "display": term.label };
+        // Package securely as CPDictionary to stop deserializer exceptions
+        var dict = [CPDictionary dictionaryWithObjectsAndKeys:
+                    formattedId, @"code",
+                    term.label, @"display"
+                   ];
+                   
         [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
         [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
         [pboard setString:formattedId forType:CPStringPboardType];
@@ -793,7 +943,6 @@
     [mainSplitView setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [mainSplitView setVertical:YES];
     
-    // ADD THIS LINE TO RENDER THE INTERFACE
     [mainView addSubview:mainSplitView]; 
 
     var leftWidth = CGRectGetWidth([mainView bounds]) * 0.35;
@@ -940,7 +1089,7 @@
     [bottomPane setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
 
     var browserBox = [[CPBox alloc] initWithFrame:CGRectMake(10, 10, rightWidth - 20, initialBottomHeight - 20)];
-    [browserBox setTitle:@"HPO Term Browser (Drag nodes or downstream items into criteria above)"];
+    [browserBox setTitle:@"HPO Term Browser"];
     [browserBox setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [bottomPane addSubview:browserBox];
 
@@ -980,8 +1129,13 @@
     [_nameOnlyCheckbox setState:CPOffState];
     [[browserBox contentView] addSubview:_nameOnlyCheckbox];
 
+    // Drag-Source Panel (Fits right below search bar at y=45)
+    _dragSourcePanel = [[HPODragSourceView alloc] initWithFrame:CGRectMake(10, 42, CGRectGetWidth(bBoxBounds) - 20, 32)];
+    [_dragSourcePanel setAutoresizingMask:CPViewWidthSizable | CPViewMaxYMargin];
+    [[browserBox contentView] addSubview:_dragSourcePanel];
+
     // Inner Split: Left (Tree Structure) / Right (Analytical details)
-    var hpoInnerSplit = [[CPSplitView alloc] initWithFrame:CGRectMake(10, 45, CGRectGetWidth(bBoxBounds) - 20, CGRectGetHeight(bBoxBounds) - 55)];
+    var hpoInnerSplit = [[CPSplitView alloc] initWithFrame:CGRectMake(10, 80, CGRectGetWidth(bBoxBounds) - 20, CGRectGetHeight(bBoxBounds) - 90)];
     [hpoInnerSplit setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [hpoInnerSplit setVertical:YES];
     [[browserBox contentView] addSubview:hpoInnerSplit];
@@ -993,7 +1147,7 @@
     var treeWidth = (innerWidth - innerDividerWidth) * 0.45;
     var detailsWidth = (innerWidth - innerDividerWidth) - treeWidth;
 
-    // Initialize the Tree Controller (Missing in your integrated version)
+    // Initialize the Tree Controller
     treeController = [[CPTreeController alloc] init];
     [treeController setChildrenKeyPath:@"children"];
     [treeController setLeafKeyPath:@"isLeaf"];
@@ -1012,7 +1166,7 @@
     [outlineView setOutlineTableColumn:column];
     [outlineView setAllowsMultipleSelection:NO];
     [outlineView setDelegate:self];
-        [treeScroll setDocumentView:outlineView];
+    [treeScroll setDocumentView:outlineView];
     [hpoInnerSplit addSubview:treeScroll];
 
     // HPO Right: Analytical Details Tab View (Conserves workspace space dynamically)
@@ -1555,9 +1709,32 @@
             var isCompositeSubgroup = NO;
             var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
             
-            if (isSubgroup && charItem.id && [charItem.id indexOf:@"composite-"] === 0)
+            // Check for composite grouping: either via ID prefix or structural content analysis
+            if (isSubgroup)
             {
-                isCompositeSubgroup = YES;
+                if (charItem.id && charItem.id.indexOf("composite-") === 0)
+                {
+                    isCompositeSubgroup = YES;
+                }
+                else
+                {
+                    // Structural review: If it contains only leaf criteria (no nested Groups), collapse it
+                    var subChars = charItem.characteristic || [];
+                    var hasNestedGroups = NO;
+                    for (var k = 0; k < subChars.length; k++)
+                    {
+                        var cItem = subChars[k];
+                        if (cItem.resourceType === "Group" || cItem.characteristic || cItem.combinationMethod)
+                        {
+                            hasNestedGroups = YES;
+                            break;
+                        }
+                    }
+                    if (!hasNestedGroups && subChars.length > 0)
+                    {
+                        isCompositeSubgroup = YES;
+                    }
+                }
             }
 
             if (isCompositeSubgroup)
@@ -1566,6 +1743,19 @@
                 [subNode setRowType:CPRuleEditorRowTypeSimple];
                 
                 var isExclude = (charItem.exclude === true);
+                
+                if (!isExclude && charItem.characteristic)
+                {
+                    for (var m = 0; m < charItem.characteristic.length; m++)
+                    {
+                        if (charItem.characteristic[m].exclude === true)
+                        {
+                            isExclude = true;
+                            break;
+                        }
+                    }
+                }
+
                 var presenceMode = @"all-present";
                 if (isExclude || charItem.combinationMethod === "neither-of")
                 {
@@ -1579,6 +1769,7 @@
                 
                 var tokens = [];
                 var subChars = charItem.characteristic || [];
+
                 for (var m = 0; m < subChars.length; m++)
                 {
                     var nestedChar = subChars[m];
@@ -2028,9 +2219,36 @@
         if (isSubgroup)
         {
             var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
-            var shouldFlatten = (flattenedSubgroup.combinationMethod === group.combinationMethod) && 
-                                ![self _groupContainsExclusions:flattenedSubgroup] && 
-                                !(flattenedSubgroup.id && [flattenedSubgroup.id hasPrefix:@"composite-"]);
+            
+            // Structural identification of composite subgroups
+            var isComposite = NO;
+            if (flattenedSubgroup.id && flattenedSubgroup.id.indexOf("composite-") === 0)
+            {
+                isComposite = YES;
+            }
+            else
+            {
+                var subChars = flattenedSubgroup.characteristic || [];
+                var hasNested = NO;
+                for (var k = 0; k < subChars.length; k++)
+                {
+                    var cItem = subChars[k];
+                    if (cItem.resourceType === "Group" || cItem.characteristic || cItem.combinationMethod)
+                    {
+                        hasNested = YES;
+                        break;
+                    }
+                }
+                if (!hasNested && subChars.length > 0)
+                {
+                    isComposite = YES;
+                }
+            }
+
+            // Collapse logical blocks that are not defined as composite nodes
+            var shouldFlatten = !isComposite && 
+                                (flattenedSubgroup.combinationMethod === group.combinationMethod) && 
+                                ![self _groupContainsExclusions:flattenedSubgroup];
 
             if (shouldFlatten)
             {
@@ -2136,6 +2354,8 @@
         [synonymsTableView reloadData];
         [xrefsTableView reloadData];
         [downstreamTableView reloadData];
+        
+        [_dragSourcePanel setTerm:nil];
         return;
     }
 
@@ -2147,6 +2367,11 @@
     [self fetchDownstreamForNode:node];
     [self fetchSynonymsForNode:node];
     [self fetchXrefsForNode:node];
+
+    // Load standard selection credentials inside the active drag view panel
+    var formattedId = "HP:" + [CPString stringWithFormat:"%07d", [node termId] + 0];
+    var termDict = { "code": formattedId, "display": [node name] };
+    [_dragSourcePanel setTerm:termDict];
 }
 
 - (BOOL)outlineView:(CPOutlineView)anOutlineView shouldExpandItem:(id)anItem
