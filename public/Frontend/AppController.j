@@ -30,7 +30,17 @@
     [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
     [pboard setString:formattedId forType:CPStringPboardType];
 
+    // Create a styled, visible drag view with a background color
     var dragView = [[CPView alloc] initWithFrame:CGRectMake(0, 0, 150, 20)];
+    [dragView setBackgroundColor:[CPColor colorWithRed:0.0 green:0.5 blue:0.7 alpha:0.85]];
+    
+    // Add a text label inside the drag view to represent the term being dragged
+    var dragLabel = [[CPTextField alloc] initWithFrame:CGRectMake(5, 2, 140, 16)];
+    [dragLabel setStringValue:[node name]];
+    [dragLabel setTextColor:[CPColor whiteColor]];
+    [dragLabel setFont:[CPFont systemFontOfSize:10.0]];
+    [dragView addSubview:dragLabel];
+
     [self dragView:dragView
                 at:CGPointMakeZero()
             offset:CGSizeMakeZero()
@@ -993,7 +1003,7 @@
     [treeScroll setAutoresizingMask:CPViewWidthSizable | CPViewHeightSizable];
     [treeScroll setAutohidesScrollers:NO];
 
-    outlineView = [[HPOOutlineView alloc] initWithFrame:[treeScroll bounds]]; 
+    outlineView = [[HPOOutlineView alloc] initWithFrame:[treeScroll bounds]];
     var column = [[CPTableColumn alloc] initWithIdentifier:@"name"];
     [[column headerView] setStringValue:@"HPO Tree Nodes"];
     [column setResizingMask:CPTableColumnAutoresizingMask];
