@@ -6,6 +6,26 @@
 @import <Foundation/Foundation.j>
 @import <AppKit/AppKit.j>
 
+// Helper to identify if an HPO code belongs to a modifier sub-ontology
+function isModifierHPOCode(code)
+{
+    if (!code) return false;
+    var match = code.match(/HP:(\d+)/i);
+    if (!match) return false;
+    var num = parseInt(match[1], 10);
+
+    // HPO sub-ontologies representing modifiers/metadata rather than Phenotypic Abnormalities:
+    if (num >= 12823 && num <= 13000) return true; // Clinical Modifier (HP:0012823) and subclasses
+    if (num >= 31797 && num <= 32100) return true; // Clinical Course (HP:0031797)
+    if (num >= 11462 && num <= 11470) return true; // Age of Onset (HP:0011462)
+    if (num >= 3577 && num <= 3623) return true;   // Onset subclasses
+    if (num >= 40279 && num <= 40300) return true; // Frequency (HP:0040279)
+    if (num >= 5 && num <= 20) return true;        // Mode of Inheritance (HP:0000005)
+    if (num >= 32443 && num <= 32455) return true; // Past Medical History (HP:0032443)
+
+    return false;
+}
+
 // --------------------------------------------------------------------------------
 // HPOOutlineView Subclass (Supports dragging while keeping TreeController Bindings)
 // --------------------------------------------------------------------------------
@@ -27,7 +47,8 @@
     // Safely wrap in CPDictionary to avoid plist serialization exceptions
     var dict = [CPDictionary dictionaryWithObjectsAndKeys:
                     formattedId, @"code",
-                [node name], @"display"
+                [node name], @"display",
+                isModifierHPOCode(formattedId) ? [CPNumber numberWithBool:YES] : [CPNumber numberWithBool:NO], @"is_modifier"
     ];
 
     var pboard = [CPPasteboard pasteboardWithName:CPDragPboard];
@@ -103,16 +124,15 @@
 {
     var minSize = [self currentValueForThemeAttribute:@"min-size"],
     contentInset = [self currentValueForThemeAttribute:@"content-inset"];
-
-    var size = CGSizeMake(0, 18); // Compact 18px height to fit cleanly in the 28px Rule Editor row
+    var size = CGSizeMake(0, 16); // Compact 18px height to fit cleanly in the 28px Rule Editor row
     var rep = [self representedObject];
     if (rep && rep.code)
     {
         var codeWidth = [rep.code sizeWithFont:[CPFont boldSystemFontOfSize:8.0]].width + 10;
 
         var displayText = rep.display || @"";
-        if (displayText.length > 10) {
-            displayText = [displayText substringToIndex:10] + @"...";
+        if (displayText.length > 30) {
+            displayText = [displayText substringToIndex:30] + @"...";
         }
         var textWidth = [displayText sizeWithFont:[CPFont systemFontOfSize:9.0]].width + 6;
         size.width = codeWidth + textWidth + 24; // Sleek and compact horizontal spacing
@@ -163,7 +183,14 @@
             codeLabel._DOMElement.innerHTML = rep.code;
 
             var codeStyle = codeLabel._DOMElement.style;
-            codeStyle.backgroundColor = "rgb(0, 128, 180)";
+            
+            // Prioritize semantic modifier flag, fallback to traditional code ranges [25]
+            if (rep.is_modifier || isModifierHPOCode(rep.code)) {
+                codeStyle.backgroundColor = "rgb(120, 120, 120)"; // Gray
+            } else {
+                codeStyle.backgroundColor = "rgb(0, 128, 180)"; // Blue
+            }
+            
             codeStyle.borderRadius = "3px";
             codeStyle.color = "white";
             codeStyle.lineHeight = "12px";
@@ -174,8 +201,8 @@
         }
 
         var displayText = rep.display || @"";
-        if (displayText.length > 10) {
-            displayText = [displayText substringToIndex:10] + @"...";
+        if (displayText.length > 30) {
+            displayText = [displayText substringToIndex:30] + @"...";
         }
 
         if (textLabel._DOMElement)
@@ -197,6 +224,21 @@
         // Position badge and label inside the 18px high token (perfect vertical centering at y=3)
         [codeLabel setFrame:CGRectMake(4, 3, codeWidth, 12)];
         [textLabel setFrame:CGRectMake(codeWidth + 8, 3, textWidth, 12)];
+    }
+}
+
+- (void)mouseUp:(CPEvent)anEvent
+{
+    [super mouseUp:anEvent];
+
+    var rep = [self representedObject];
+    if (rep && rep.code)
+    {
+        var appDelegate = [CPApp delegate];
+        if (appDelegate && [appDelegate respondsToSelector:@selector(searchForHPOTerm:)])
+        {
+            [appDelegate searchForHPOTerm:rep.code];
+        }
     }
 }
 
@@ -251,7 +293,14 @@
         [_badge setStringValue:_representedTerm.code];
         [_label setStringValue:_representedTerm.display];
         [_label setTextColor:[CPColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0]];
-        _badge._DOMElement.style.backgroundColor = "#0080B4";
+        
+        // Dynamically color modifier badges gray, otherwise blue [25]
+        if (_representedTerm.is_modifier || isModifierHPOCode(_representedTerm.code)) {
+            _badge._DOMElement.style.backgroundColor = "#787878"; // Gray
+        } else {
+            _badge._DOMElement.style.backgroundColor = "#0080B4"; // Blue
+        }
+        
         self._DOMElement.style.backgroundColor = [CPColor colorWithRed:0.9 green:0.95 blue:1.0 alpha:1.0];
         self._DOMElement.style.border = "1.5px dashed #0080B4";
         self._DOMElement.style.cursor = "grab";
@@ -281,7 +330,8 @@
     // Avoid raw object plist serialization errors by using a CPDictionary
     var dict = [CPDictionary dictionaryWithObjectsAndKeys:
                     _representedTerm.code, @"code",
-                _representedTerm.display, @"display"
+                _representedTerm.display, @"display",
+                (_representedTerm.is_modifier || isModifierHPOCode(_representedTerm.code)) ? [CPNumber numberWithBool:YES] : [CPNumber numberWithBool:NO], @"is_modifier"
     ];
 
     [pboard setPropertyList:dict forType:@"HPOTermPboardType"];
@@ -366,17 +416,20 @@
     {
         var code = nil;
         var display = nil;
+        var isModifier = false;
 
         // Securely handle serialized CPDictionary properties as well as plain objects
         if ([dict respondsToSelector:@selector(objectForKey:)])
         {
             code = [dict objectForKey:@"code"];
             display = [dict objectForKey:@"display"];
+            isModifier = [[dict objectForKey:@"is_modifier"] boolValue];
         }
         else
         {
             code = dict.code;
             display = dict.display;
+            isModifier = dict.is_modifier;
         }
 
         if (code)
@@ -395,7 +448,7 @@
             if (!exists)
             {
                 var mutableTokens = [CPMutableArray arrayWithArray:tokens];
-                [mutableTokens addObject:{ "code": code, "display": display }];
+                [mutableTokens addObject:{ "code": code, "display": display, "is_modifier": isModifier }];
                 [self setObjectValue:mutableTokens];
 
                 if (_editorController)
@@ -706,7 +759,7 @@
                 return cachedField;
             }
 
-            var tokenField = [[HPOTokenField alloc] initWithFrame:CGRectMake(0, 0, 320, 24)];
+            var tokenField = [[HPOTokenField alloc] initWithFrame:CGRectMake(0, 0, 800, 24)];
             [tokenField setEditorController:_controller];
             [tokenField registerForDraggedTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", nil]];
 
@@ -904,7 +957,8 @@
     // Package securely as CPDictionary to stop deserializer exceptions
     var dict = [CPDictionary dictionaryWithObjectsAndKeys:
                     formattedId, @"code",
-                [node name], @"display"
+                [node name], @"display",
+                isModifierHPOCode(formattedId) ? [CPNumber numberWithBool:YES] : [CPNumber numberWithBool:NO], @"is_modifier"
     ];
 
     [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
@@ -926,7 +980,8 @@
         // Package securely as CPDictionary to stop deserializer exceptions
         var dict = [CPDictionary dictionaryWithObjectsAndKeys:
                         formattedId, @"code",
-                    term.label, @"display"
+                    term.label, @"display",
+                    isModifierHPOCode(formattedId) ? [CPNumber numberWithBool:YES] : [CPNumber numberWithBool:NO], @"is_modifier"
         ];
 
         [pboard declareTypes:[CPArray arrayWithObjects:@"HPOTermPboardType", CPStringPboardType, nil] owner:self];
@@ -1330,6 +1385,32 @@
     [_reportInputTextView setAutoresizingMask:CPViewWidthSizable];
     [inputScroll2 setDocumentView:_reportInputTextView];
 
+    // ====================================================================
+    // Prepopulate with eligible patient medical report
+    // ====================================================================
+    var demoPatientReport = "Ophthalmology Consultation Note\n\n" +
+                            "Patient Name: Jane Doe\n" +
+                            "Age: 45\n" +
+                            "Date: June 29, 2026\n\n" +
+                            "Chief Complaint:\n" +
+                            "The patient reports severe ocular discomfort, a persistent foreign body sensation, and a burning sensation in both eyes for the past several months.\n\n" +
+                            "Ocular Examination:\n" +
+                            "- Slit-lamp biomicroscopy reveals clear bilateral corneal epithelial erosion and punctate keratitis.\n" +
+                            "- No signs of active ocular infection (no bacterial conjunctivitis, keratitis, or blepharitis).\n" +
+                            "- No evidence of active ocular allergy.\n" +
+                            "- Schirmer's I test results (without anesthesia):\n" +
+                            "  * Right eye: 6 mm / 5 minutes\n" +
+                            "  * Left eye: 5 mm / 5 minutes\n" +
+                            "  (Significant decreased tear production verified)\n\n" +
+                            "Medical History:\n" +
+                            "- No history of refractive corneal surgery (including LASIK or PRK).\n" +
+                            "- No history of secondary Sjögren's syndrome.\n\n" +
+                            "Assessment:\n" +
+                            "Moderate to severe Keratoconjunctivitis Sicca (Dry Eye Disease) with associated corneal epithelial erosion.";
+
+    [_reportInputTextView setString:demoPatientReport];
+    // ====================================================================
+
     [[inputBox contentView] addSubview:inputScroll2];
     [extractorSplit addSubview:inputBox];
 
@@ -1680,9 +1761,10 @@
         if (!error && data) {
             try {
                 var parsedData = JSON.parse(data);
-                console.log("DEBUG [Backend Response] raw phenopacket: ", parsedData);
+                console.log("DEBUG [Backend Response] raw fhir: ", parsedData);
 
-                if (parsedData && (parsedData.characteristics || parsedData.combinationMethod)) {
+                // Bypass conversion if the response is already a valid FHIR Group!
+                if (parsedData && parsedData.resourceType !== "Group" && (parsedData.characteristics || parsedData.combinationMethod)) {
                     parsedData = [self convertCustomJSONToFHIRGroup:parsedData];
                 }
 
@@ -1695,7 +1777,7 @@
                 alert("Error parsing server-side extraction response: " + e.message);
             }
         } else {
-            var errorMsg = (error) ? [error localizedDescription] : @"Could not connect to database services.";
+            var errorMsg = (error) ? [error description] : @"Could not connect to database services.";
             alert("Model Extraction Failure:\n" + errorMsg);
         }
     }];
@@ -1749,7 +1831,7 @@
                 [_phenopacketOutputTextView setString:data];
             }
         } else {
-            var errorMsg = (error) ? [error localizedDescription] : @"Unknown error occurred.";
+            var errorMsg = (error) ? [error description] : @"Unknown error occurred.";
             [_phenopacketOutputTextView setString:@"Failed to extract phenopacket:\n\n" + errorMsg];
             console.log("Extraction Error: ", error);
         }
@@ -1975,8 +2057,7 @@
         {
             var charItem = characteristics[i];
             var isCompositeSubgroup = NO;
-            var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
-
+            var isSubgroup = (charItem.resourceType === "Group" || (charItem.characteristic && charItem.characteristic.length > 0));
             // Check for composite grouping: either via ID prefix or structural content analysis
             if (isSubgroup)
             {
@@ -2053,7 +2134,8 @@
                             {
                                 tokens.push({
                                     "code": codeVal,
-                                    "display": coding.display || codeVal
+                                    "display": coding.display || codeVal,
+                                    "is_modifier": (coding.is_modifier === true || coding.is_modifier === 1)
                                 });
                             }
                             else
@@ -2114,7 +2196,8 @@
                         {
                             tokens.push({
                                 "code": codeVal,
-                                "display": coding.display || codeVal
+                                "display": coding.display || codeVal,
+                                "is_modifier": (coding.is_modifier === true || coding.is_modifier === 1)
                             });
                         }
                         else
@@ -2167,7 +2250,8 @@
                 {
                     tokens.push({
                         "code": codeVal,
-                        "display": coding.display || codeVal
+                        "display": coding.display || codeVal,
+                        "is_modifier": (coding.is_modifier === true || coding.is_modifier === 1)
                     });
                 }
                 else
@@ -2365,7 +2449,8 @@
                     var codings = [{
                         "system": "http://human-phenotype-ontology.org",
                         "code": tok.code,
-                        "display": tok.display
+                        "display": tok.display,
+                        "is_modifier": tok.is_modifier ? true : false
                     }];
 
                     [subCharItem setObject:{"coding": codings} forKey:@"valueCodeableConcept"];
@@ -2398,7 +2483,8 @@
                         codings.push({
                             "system": "http://human-phenotype-ontology.org",
                             "code": tok.code,
-                            "display": tok.display
+                            "display": tok.display,
+                            "is_modifier": tok.is_modifier ? true : false
                         });
                     }
                 }
@@ -2462,7 +2548,7 @@
         if (charItem.exclude === true || charItem.combinationMethod === "neither-of")
             return YES;
 
-        var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
+        var isSubgroup = (charItem.resourceType === "Group" || (charItem.characteristic && charItem.characteristic.length > 0));
         if (isSubgroup)
         {
             if ([self _groupContainsExclusions:charItem])
@@ -2482,8 +2568,7 @@
     for (var i = 0; i < characteristics.length; i++)
     {
         var charItem = characteristics[i];
-        var isSubgroup = (charItem.resourceType === "Group" || charItem.characteristic || charItem.combinationMethod);
-
+        var isSubgroup = (charItem.resourceType === "Group" || (charItem.characteristic && charItem.characteristic.length > 0));
         if (isSubgroup)
         {
             var flattenedSubgroup = [self _flattenFHIRGroup:charItem];
@@ -2688,7 +2773,7 @@
 
     // Load standard selection credentials inside the active drag view panel
     var formattedId = "HP:" + [CPString stringWithFormat:"%07d", [node termId] + 0];
-    var termDict = { "code": formattedId, "display": [node name] };
+    var termDict = { "code": formattedId, "display": [node name], "is_modifier": isModifierHPOCode(formattedId) };
     [_dragSourcePanel setTerm:termDict];
 }
 
@@ -2868,6 +2953,15 @@
 // --------------------------------------------------------------------------------
 // Search & Hierarchy Expansion Algorithms
 // --------------------------------------------------------------------------------
+
+- (void)searchForHPOTerm:(CPString)aCode
+{
+    if (!aCode || [aCode length] === 0) return;
+
+    [_searchField setStringValue:aCode];
+    [_nameOnlyCheckbox setState:CPOffState];
+    [self performSearchForString:aCode isNameOnly:NO];
+}
 
 - (void)searchAction:(id)sender
 {
@@ -3345,7 +3439,7 @@
 
 
 // --------------------------------------------------------------------------------
-// JSON Utilities
+// JSON Serialization Utilities
 // --------------------------------------------------------------------------------
 
 @implementation CPJSONSerialization : CPObject
